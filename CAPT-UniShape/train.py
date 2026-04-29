@@ -197,13 +197,13 @@ def _compute_class_weights(
     dataset: Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     num_classes: int,
     device: torch.device,
-    mode: str = "balanced",
+    mode: str = "sqrt_balanced",
 ) -> torch.Tensor | None:
-    """Compute inverse-frequency class weights from the training split."""
+    """Compute class weights from the training split."""
     normalized_mode = str(mode).lower()
     if normalized_mode in {"", "none", "false", "off", "disabled"}:
         return None
-    if normalized_mode not in {"balanced", "inverse_frequency"}:
+    if normalized_mode not in {"balanced", "inverse_frequency", "sqrt_balanced", "effective_number"}:
         raise ValueError(f"Unsupported class_weighting mode: {mode}")
     counts_map = _dataset_label_counts(dataset)
     counts = torch.tensor(
@@ -215,8 +215,14 @@ def _compute_class_weights(
     if not bool(present.any()):
         return None
     weights = torch.zeros_like(counts)
-    total = counts[present].sum()
-    weights[present] = total / (float(present.sum().item()) * counts[present].clamp_min(1.0))
+    if normalized_mode == "effective_number":
+        beta = 0.999
+        weights[present] = (1.0 - beta) / (1.0 - torch.pow(torch.full_like(counts[present], beta), counts[present].clamp_min(1.0)))
+    else:
+        total = counts[present].sum()
+        weights[present] = total / (float(present.sum().item()) * counts[present].clamp_min(1.0))
+        if normalized_mode == "sqrt_balanced":
+            weights[present] = torch.sqrt(weights[present])
     weights[present] = weights[present] / weights[present].mean().clamp_min(1e-6)
     return weights
 
@@ -461,7 +467,7 @@ def run_training(
     print(f"输出目录: {target_dir}", flush=True)
     model = build_experiment_model(config, device, op_pretrained=op_pretrained, eis_pretrained=eis_pretrained)
     optimizer = build_optimizer(model, experiment)
-    class_weighting = str(class_weighting_override if class_weighting_override is not None else experiment.get("class_weighting", "balanced"))
+    class_weighting = str(class_weighting_override if class_weighting_override is not None else experiment.get("class_weighting", "sqrt_balanced"))
     class_weights = _compute_class_weights(train_ds, int(config["num_classes"]), device, mode=class_weighting)
     if class_weights is None:
         print("类别加权 CE: disabled", flush=True)
@@ -636,7 +642,7 @@ def parse_args(args: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--refit-trainval", action=argparse.BooleanOptionalAction, default=None, help="Select epoch on val, then refit final model on train+val")
     parser.add_argument("--min-epochs-before-stop", type=int, default=None, help="Do not trigger early stopping before this epoch")
     parser.add_argument("--val-metric-smoothing", type=int, default=None, help="Moving average window for val macro-F1 selection score")
-    parser.add_argument("--class-weighting", choices=["balanced", "inverse_frequency", "none"], default=None, help="Class weighting mode for neural-network CE loss")
+    parser.add_argument("--class-weighting", choices=["sqrt_balanced", "balanced", "inverse_frequency", "effective_number", "none"], default=None, help="Class weighting mode for neural-network CE loss")
     return parser.parse_args(args)
 
 

@@ -255,7 +255,7 @@ def build_npz(
     min_train_stride: int | None = None,
     max_train_stride: int | None = None,
     class_stride_power: float = 1.0,
-    group_split_strategy: str = "three_way",
+    group_split_strategy: str = "holdout_first",
 ) -> dict[str, object]:
     resolved_min_train_stride = int(min_train_stride if min_train_stride is not None else max(1, stride_train // 2))
     resolved_max_train_stride = int(max_train_stride if max_train_stride is not None else max(stride_train, stride_train * 2))
@@ -395,7 +395,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-train-stride", type=int, default=None, help="Minimum class-aware training stride; default=stride_train//2")
     parser.add_argument("--max-train-stride", type=int, default=None, help="Maximum class-aware training stride; default=stride_train*2")
     parser.add_argument("--class-stride-power", type=float, default=1.0, help="Power for class-count-to-stride scaling")
-    parser.add_argument("--group-split-strategy", choices=["three_way", "two_stage"], default="three_way", help="Group-level split strategy; three_way preserves global val/test proportions more directly")
+    parser.add_argument("--group-split-strategy", choices=["holdout_first", "three_way", "two_stage"], default="holdout_first", help="Group-level split strategy; holdout_first makes val/test siblings from the same held-out pool")
     return parser.parse_args()
 
 

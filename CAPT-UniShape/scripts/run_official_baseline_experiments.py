@@ -56,6 +56,74 @@ MODEL_CATEGORIES = {
 }
 
 
+def _ratio_train_fraction(ratio: str, fixed_test_ratio: str) -> float:
+    """Map a nominal train/test ratio to a train-subset fraction under fixed test."""
+    base_train_pool = 1.0 - float(RATIO_TO_TEST_SIZE[fixed_test_ratio])
+    target_train_pool = 1.0 - float(RATIO_TO_TEST_SIZE[ratio])
+    if base_train_pool <= 0:
+        raise ValueError("fixed_test_ratio leaves no training pool")
+    fraction = target_train_pool / base_train_pool
+    if fraction > 1.0 + 1e-12:
+        raise ValueError(f"ratio={ratio} needs more training data than fixed_test_ratio={fixed_test_ratio}")
+    return min(1.0, max(0.0, fraction))
+
+
+def _label_count_dict(values: np.ndarray[Any, Any]) -> dict[str, int]:
+    if values.size == 0:
+        return {}
+    unique, counts = np.unique(values, return_counts=True)
+    return {str(int(label)): int(count) for label, count in zip(unique, counts)}
+
+
+def _make_train_subset_npz(base_npz: Path, output_npz: Path, train_fraction: float, seed: int) -> Path:
+    """Keep val/test fixed and stratified-subsample only train windows."""
+    data = np.load(base_npz)
+    if "split" not in data:
+        raise ValueError(f"{base_npz} 缺少 split 数组，无法固定验证/测试集")
+    label_key = "labels" if "labels" in data else "y"
+    labels = np.asarray(data[label_key], dtype=np.int64)
+    split = np.asarray(data["split"], dtype=np.int64)
+    train_indices = np.where(split == 0)[0]
+    heldout_indices = np.where(split != 0)[0]
+    rng = np.random.default_rng(int(seed))
+    selected_train: list[int] = []
+    for label in sorted(np.unique(labels[train_indices]).tolist()):
+        class_indices = train_indices[labels[train_indices] == label].copy()
+        rng.shuffle(class_indices)
+        keep = int(round(len(class_indices) * float(train_fraction)))
+        keep = max(1, min(len(class_indices), keep))
+        selected_train.extend(class_indices[:keep].tolist())
+    selected = np.asarray(sorted(selected_train) + heldout_indices.tolist(), dtype=np.int64)
+    payload: dict[str, np.ndarray[Any, Any]] = {}
+    total_samples = int(split.shape[0])
+    for key in data.files:
+        array = np.asarray(data[key])
+        if array.ndim > 0 and int(array.shape[0]) == total_samples:
+            payload[key] = array[selected].copy()
+        else:
+            payload[key] = array.copy()
+    payload["split"] = split[selected].copy()
+    output_npz.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output_npz, **payload)
+    summary = {
+        "source_npz": str(base_npz),
+        "output_path": str(output_npz),
+        "split_protocol": "fixed_test_train_subset",
+        "train_fraction_from_fixed_pool": float(train_fraction),
+        "num_samples": int(len(selected)),
+        "train_size": int((payload["split"] == 0).sum()),
+        "val_size": int((payload["split"] == 1).sum()),
+        "test_size": int((payload["split"] == 2).sum()),
+        "split_label_counts": {
+            "train": _label_count_dict(labels[selected][payload["split"] == 0]),
+            "val": _label_count_dict(labels[selected][payload["split"] == 1]),
+            "test": _label_count_dict(labels[selected][payload["split"] == 2]),
+        },
+    }
+    output_npz.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    return output_npz
+
+
 class BaselineNPZDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):
     """Split-aware NPZ dataset for baseline models."""
 
@@ -374,6 +442,28 @@ def _ml_parameter_count(model: Any) -> int:
     return total
 
 
+def _torch_class_weights(labels: torch.Tensor, num_classes: int, device: torch.device, mode: str) -> torch.Tensor | None:
+    normalized_mode = str(mode).lower()
+    if normalized_mode in {"", "none", "false", "off", "disabled"}:
+        return None
+    if normalized_mode not in {"sqrt_balanced", "balanced", "inverse_frequency", "effective_number"}:
+        raise ValueError(f"Unsupported class_weighting mode: {mode}")
+    counts = torch.bincount(labels, minlength=num_classes).to(device=device, dtype=torch.float32)
+    present = counts > 0
+    if not bool(present.any()):
+        return None
+    weights = torch.zeros_like(counts)
+    if normalized_mode == "effective_number":
+        beta = 0.999
+        weights[present] = (1.0 - beta) / (1.0 - torch.pow(torch.full_like(counts[present], beta), counts[present].clamp_min(1.0)))
+    else:
+        weights[present] = counts[present].sum() / (float(present.sum().item()) * counts[present].clamp_min(1.0))
+        if normalized_mode == "sqrt_balanced":
+            weights[present] = torch.sqrt(weights[present])
+    weights[present] = weights[present] / weights[present].mean().clamp_min(1e-6)
+    return weights
+
+
 def _build_ml_model(model_key: str, seed: int, rf_estimators: int) -> Any:
     if model_key == "logreg":
         return make_pipeline(
@@ -479,6 +569,7 @@ def run_torch_baseline(
     refit_trainval: bool,
     min_epochs_before_stop: int,
     val_metric_smoothing: int,
+    class_weighting: str,
 ) -> Path:
     torch.manual_seed(seed)
     num_classes = _num_classes(npz_path)
@@ -491,13 +582,12 @@ def run_torch_baseline(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = _build_torch_model(model_key, train_ds, num_classes, hidden_dim, d_model, num_layers, dropout).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    train_counts = torch.bincount(train_ds.labels, minlength=num_classes).to(device=device, dtype=torch.float32)
-    present = train_counts > 0
-    class_weights = torch.zeros_like(train_counts)
-    class_weights[present] = train_counts[present].sum() / (float(present.sum().item()) * train_counts[present].clamp_min(1.0))
-    class_weights[present] = class_weights[present] / class_weights[present].mean().clamp_min(1e-6)
+    class_weights = _torch_class_weights(train_ds.labels, num_classes, device, class_weighting)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
-    print(f"{model_key}: 类别加权 CE weights={class_weights.detach().cpu().tolist()}", flush=True)
+    if class_weights is None:
+        print(f"{model_key}: 类别加权 CE disabled", flush=True)
+    else:
+        print(f"{model_key}: 类别加权 CE mode={class_weighting}, weights={class_weights.detach().cpu().tolist()}", flush=True)
     best_state: dict[str, torch.Tensor] | None = None
     best_selection_score = -1.0
     best_epoch = 0
@@ -576,6 +666,7 @@ def run_proposed_model(
     refit_trainval: bool,
     min_epochs_before_stop: int,
     val_metric_smoothing: int,
+    class_weighting: str,
 ) -> Path:
     config = load_config(ROOT / "configs/rbf_kanfusion.yaml")
     experiment = config.setdefault("experiment", {})
@@ -592,6 +683,7 @@ def run_proposed_model(
         refit_trainval_override=refit_trainval,
         min_epochs_before_stop_override=min_epochs_before_stop,
         val_metric_smoothing_override=val_metric_smoothing,
+        class_weighting_override=class_weighting,
     )
     return output_dir / "metrics.json"
 
@@ -603,6 +695,8 @@ def main() -> None:
     parser.add_argument("--models", nargs="+", default=list(MODEL_CATEGORIES.keys()), choices=list(MODEL_CATEGORIES.keys()))
     parser.add_argument("--output-root", default="results/official_baseline_comparison")
     parser.add_argument("--data-root", default="data/processed/official_baseline_comparison")
+    parser.add_argument("--split-protocol", choices=["fixed_test", "independent"], default="fixed_test", help="fixed_test 固定同一验证/测试集，只改变训练子集大小；independent 为每个比例单独重划分")
+    parser.add_argument("--fixed-test-ratio", choices=list(RATIO_TO_TEST_SIZE.keys()), default="8_2", help="fixed_test 协议使用的固定验证/测试集基准比例")
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--stride-train", type=int, default=16)
     parser.add_argument("--stride-eval", type=int, default=64)
@@ -611,7 +705,7 @@ def main() -> None:
     parser.add_argument("--segment-gap-seconds", type=float, default=600.0)
     parser.add_argument("--segment-block-seconds", type=float, default=240.0)
     parser.add_argument("--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--group-split-strategy", choices=["three_way", "two_stage"], default="three_way", help="分组划分策略；three_way 直接按全局 train/val/test 比例分层切分")
+    parser.add_argument("--group-split-strategy", choices=["holdout_first", "three_way", "two_stage"], default="holdout_first", help="分组划分策略；holdout_first 先划分训练集与 held-out，再从 held-out 中分出验证/测试")
     parser.add_argument("--val-size", type=float, default=0.25)
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--patience", type=int, default=10)
@@ -632,6 +726,7 @@ def main() -> None:
     parser.add_argument("--min-train-stride", type=int, default=None, help="类别感知训练步长下限；默认 stride_train//2")
     parser.add_argument("--max-train-stride", type=int, default=None, help="类别感知训练步长上限；默认 stride_train*2")
     parser.add_argument("--class-stride-power", type=float, default=1.0, help="类别样本数到训练步长的缩放幂指数")
+    parser.add_argument("--class-weighting", choices=["sqrt_balanced", "balanced", "inverse_frequency", "effective_number", "none"], default="sqrt_balanced", help="神经网络模型 CE 类别权重模式")
     args = parser.parse_args()
 
     output_root = ROOT / args.output_root
@@ -642,12 +737,13 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     ml_models = {"logreg", "svm", "random_forest"}
     torch_models = {"mlp", "cnn1d", "lstm", "transformer", "itransformer"}
-    for ratio in args.ratios:
-        npz_path = data_root / f"official_self_stack_impedance_eis_w{args.window_size}_{ratio}.npz"
-        print(f"\n=== 构建数据: train/test={ratio.replace('_', ':')} ===", flush=True)
+    fixed_base_npz: Path | None = None
+    if args.split_protocol == "fixed_test":
+        fixed_base_npz = data_root / f"official_self_stack_impedance_eis_w{args.window_size}_{args.fixed_test_ratio}_fixed_base.npz"
+        print(f"\n=== 构建固定验证/测试基准数据: train/test={args.fixed_test_ratio.replace('_', ':')} ===", flush=True)
         build_npz(
             excel_path=ROOT / args.excel,
-            output_path=npz_path,
+            output_path=fixed_base_npz,
             window_size=args.window_size,
             stride_train=args.stride_train,
             stride_eval=args.stride_eval,
@@ -658,7 +754,7 @@ def main() -> None:
             segment_label_boundary=args.segment_label_boundary,
             random_state=args.seed,
             op_source="stack",
-            test_size=RATIO_TO_TEST_SIZE[ratio],
+            test_size=RATIO_TO_TEST_SIZE[args.fixed_test_ratio],
             val_size=args.val_size,
             class_aware_train_stride=args.class_aware_train_stride,
             min_train_stride=args.min_train_stride,
@@ -666,6 +762,42 @@ def main() -> None:
             class_stride_power=args.class_stride_power,
             group_split_strategy=args.group_split_strategy,
         )
+    for ratio in args.ratios:
+        npz_path = data_root / f"official_self_stack_impedance_eis_w{args.window_size}_{ratio}.npz"
+        if args.split_protocol == "fixed_test":
+            if fixed_base_npz is None:
+                raise RuntimeError("fixed_base_npz was not created")
+            train_fraction = _ratio_train_fraction(ratio, args.fixed_test_ratio)
+            print(
+                f"\n=== 构建固定测试协议数据: nominal={ratio.replace('_', ':')} | "
+                f"train_fraction={train_fraction:.3f} | fixed_test={args.fixed_test_ratio.replace('_', ':')} ===",
+                flush=True,
+            )
+            ratio_seed_offset = list(RATIO_TO_TEST_SIZE.keys()).index(ratio) * 10_003
+            _make_train_subset_npz(fixed_base_npz, npz_path, train_fraction=train_fraction, seed=args.seed + ratio_seed_offset)
+        else:
+            print(f"\n=== 构建独立比例数据: train/test={ratio.replace('_', ':')} ===", flush=True)
+            build_npz(
+                excel_path=ROOT / args.excel,
+                output_path=npz_path,
+                window_size=args.window_size,
+                stride_train=args.stride_train,
+                stride_eval=args.stride_eval,
+                eis_seq_len=args.eis_seq_len,
+                split_mode=args.split_mode,
+                segment_gap_seconds=args.segment_gap_seconds,
+                segment_block_seconds=args.segment_block_seconds,
+                segment_label_boundary=args.segment_label_boundary,
+                random_state=args.seed,
+                op_source="stack",
+                test_size=RATIO_TO_TEST_SIZE[ratio],
+                val_size=args.val_size,
+                class_aware_train_stride=args.class_aware_train_stride,
+                min_train_stride=args.min_train_stride,
+                max_train_stride=args.max_train_stride,
+                class_stride_power=args.class_stride_power,
+                group_split_strategy=args.group_split_strategy,
+            )
         for model_key in args.models:
             run_dir = output_root / ratio / model_key
             print(f"\n=== 对比实验: {model_key} | train/test={ratio.replace('_', ':')} ===", flush=True)
@@ -680,6 +812,7 @@ def main() -> None:
                     args.refit_trainval,
                     args.min_epochs_before_stop,
                     args.val_metric_smoothing,
+                    args.class_weighting,
                 )
             elif model_key in ml_models:
                 metrics_path = run_ml_baseline(model_key, npz_path, run_dir, args.seed, args.rf_estimators, args.refit_trainval)
@@ -702,6 +835,7 @@ def main() -> None:
                     refit_trainval=args.refit_trainval,
                     min_epochs_before_stop=args.min_epochs_before_stop,
                     val_metric_smoothing=args.val_metric_smoothing,
+                    class_weighting=args.class_weighting,
                 )
             else:
                 raise KeyError(model_key)

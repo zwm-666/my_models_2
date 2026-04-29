@@ -148,7 +148,7 @@ def main() -> None:
     parser.add_argument("--segment-gap-seconds", type=float, default=600.0)
     parser.add_argument("--segment-block-seconds", type=float, default=240.0)
     parser.add_argument("--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--group-split-strategy", choices=["three_way", "two_stage"], default="three_way", help="分组划分策略；three_way 直接按全局 train/val/test 比例分层切分")
+    parser.add_argument("--group-split-strategy", choices=["holdout_first", "three_way", "two_stage"], default="holdout_first", help="分组划分策略；holdout_first 先划分训练集与 held-out，再从 held-out 中分出验证/测试")
     parser.add_argument("--val-size", type=float, default=0.25)
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--patience", type=int, default=10)

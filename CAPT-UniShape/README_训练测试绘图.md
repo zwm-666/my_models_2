@@ -15,8 +15,9 @@ cd "D:\learn\论文所需材料\论文2\CAPT-UniShape"
 当前论文实验只保留三条主线：
 
 1. **四组训练集/测试集比例的完整基准对比实验**
-   - 比例：8:2、7:3、6:4、5:5。
-   - 本文模型：`proposed`。
+    - 比例：8:2、7:3、6:4、5:5。
+   - 当前默认使用 `--split-protocol fixed_test`：先固定一套 8:2 的验证/测试集，再只从同一训练池内按比例减少训练窗口，避免不同测试集难度导致“训练比例越少测试越好”的反常比较。
+    - 本文模型：`proposed`。
    - 传统机器学习基准：`logreg`、`svm`、`random_forest`。
    - 深度学习基准：`mlp`、`cnn1d`、`lstm`。
    - Transformer 类基准：`transformer`、`itransformer`。

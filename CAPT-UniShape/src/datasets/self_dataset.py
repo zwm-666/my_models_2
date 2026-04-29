@@ -153,12 +153,33 @@ def _group_split(
     g_train, g_val, g_test : arrays of group identifiers
     """
     normalized_strategy = str(strategy).lower()
+    global_val_size = float(val_size) * max(0.0, 1.0 - float(test_size))
+    if normalized_strategy == "holdout_first":
+        holdout_size = float(test_size) + global_val_size
+        if not 0.0 < holdout_size < 1.0:
+            raise ValueError("holdout_first requires 0 < test_size + val_size * (1 - test_size) < 1")
+        g_tr, g_holdout = train_test_split(
+            groups,
+            test_size=holdout_size,
+            stratify=group_labels,
+            random_state=random_state,
+        )
+        label_map = dict(zip(groups, group_labels))
+        holdout_labels = np.array([label_map[g] for g in g_holdout])
+        test_fraction_within_holdout = float(test_size) / holdout_size
+        g_va, g_te = train_test_split(
+            g_holdout,
+            test_size=test_fraction_within_holdout,
+            stratify=holdout_labels,
+            random_state=random_state,
+        )
+        return np.asarray(g_tr), np.asarray(g_va), np.asarray(g_te)
+
     if normalized_strategy == "three_way":
         rng = np.random.default_rng(int(random_state))
         train_groups: List[object] = []
         val_groups: List[object] = []
         test_groups: List[object] = []
-        global_val_size = float(val_size) * max(0.0, 1.0 - float(test_size))
         for label in sorted(np.unique(group_labels).tolist()):
             class_groups = groups[group_labels == label].copy()
             rng.shuffle(class_groups)
