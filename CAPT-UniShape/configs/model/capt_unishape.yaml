@@ -1,0 +1,36 @@
+# ===========================================================================
+# Model configuration -- CAPT-UniShape
+# ===========================================================================
+# Full multi-modal architecture with condition-aware prototype transport.
+
+# --- Core Transformer dimensions ---
+d_model: 256
+num_layers: 4
+num_heads: 8
+dropout: 0.1
+
+# --- Multi-scale partition ---
+scale_set: [32, 64, 128]
+
+# --- Branch switches (ablation controls) ---
+use_eis_branch: true
+use_condition_attention: true
+use_cross_modal: true
+use_capt: true
+
+# --- EIS adapter ---
+eis_segment_lengths: [8, 16, 32]
+
+# --- Cross-modal fusion ---
+fusion_hidden_dim: 256
+modality_dropout: 0.2     # Training-time random modality dropout rate
+
+# --- CAPT classification head ---
+capt_hidden_dim: 64       # Hidden dim of per-class offset generator G_k
+temperature: 0.07         # Cosine similarity temperature tau
+num_classes: 6
+
+# --- Auxiliary loss switches ---
+use_cb_loss: true              # Class-balanced focal loss
+use_transport_reg: true        # L2 regularisation on prototype offsets
+use_residual_consistency: true # Smoothness penalty on condition-aware prototypes

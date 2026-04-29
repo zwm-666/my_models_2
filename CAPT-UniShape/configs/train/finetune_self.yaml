@@ -1,0 +1,40 @@
+# ===========================================================================
+# Training configuration -- Fine-tuning on self-measured PEMFC data
+# ===========================================================================
+
+_base_:
+  - "configs/dataset/self_pemfc.yaml"
+  - "configs/model/capt_unishape_self.yaml"
+  - "configs/experiment/default.yaml"
+
+# --- Optimiser ---
+optimizer: "adamw"
+lr: 3.0e-4
+weight_decay: 1.0e-4
+batch_size: 32
+num_workers: 0
+
+# --- Training schedule ---
+max_epochs: 80
+warmup_epochs: 5
+grad_clip: 1.0
+frozen_epochs: 0
+
+# --- Loss weights ---
+gamma1: 0.01     # Transport regularisation
+gamma2: 0.005    # Residual consistency
+gamma3: 0.0      # Auxiliary shape loss (disabled)
+beta: 0.9999     # Class-balance coefficient
+
+# --- Early stopping ---
+patience: 15
+min_delta: 0.001
+
+# --- Learning rate scheduler ---
+scheduler: "cosine"
+
+# --- Pretrained checkpoint ---
+pretrain_checkpoint: ""
+
+# --- Seeds ---
+seeds: [42, 123, 456]

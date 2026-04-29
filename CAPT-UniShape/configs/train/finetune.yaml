@@ -1,0 +1,44 @@
+# ===========================================================================
+# Training configuration -- Fine-tuning
+# ===========================================================================
+# Supervised fine-tuning of CAPT-UniShape on PEMFC fault classification.
+
+# Base configs to merge (loaded first, then overridden by this file)
+_base_:
+  - "configs/dataset/default.yaml"
+  - "configs/model/capt_unishape.yaml"
+  - "configs/experiment/default.yaml"
+
+# --- Optimiser ---
+optimizer: "adamw"
+lr: 1.0e-4
+weight_decay: 1.0e-4
+batch_size: 64
+num_workers: 0    # Set to 2 on Kaggle, 4 on local multi-core machines
+
+# --- Training schedule ---
+max_epochs: 100
+warmup_epochs: 5
+grad_clip: 1.0
+frozen_epochs: 10    # Freeze backbone (adapter + Transformer) for first N epochs
+
+# --- Loss weights ---
+gamma1: 0.01   # Transport regularisation weight (Delta_k L2)
+gamma2: 0.01   # Residual consistency weight (prototype smoothness)
+gamma3: 0.1    # Auxiliary shape reconstruction loss weight
+beta: 0.9999   # Class-balance effective number coefficient
+
+# --- Early stopping ---
+patience: 15
+min_delta: 0.001
+
+# --- Learning rate scheduler ---
+scheduler: "reduce_on_plateau"
+scheduler_patience: 5
+scheduler_factor: 0.5
+
+# --- Pretrained checkpoint (optional) ---
+pretrain_checkpoint: ""   # Path to pretrain_last.ckpt; empty = train from scratch
+
+# --- Reproducibility: run over multiple seeds ---
+seeds: [42, 123, 456, 789, 1024]

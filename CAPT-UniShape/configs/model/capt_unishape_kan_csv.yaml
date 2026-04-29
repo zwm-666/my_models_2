@@ -1,0 +1,37 @@
+# ===========================================================================
+# Model configuration -- CAPT-UniShape-KAN for CSV PEMFC data (op-only)
+# ===========================================================================
+
+model_name: "capt_unishape_kan"
+head_type: "capt_kan"
+
+d_model: 256
+num_layers: 4
+num_heads: 8
+dropout: 0.15
+
+scale_set: [8, 16, 32]
+eis_segment_lengths: [8, 16]
+
+use_eis_branch: false
+use_condition_attention: true
+use_cross_modal: false
+use_capt: true
+
+fusion_hidden_dim: 256
+modality_dropout: 0.0
+
+temperature: 0.07
+num_classes: 3
+
+kan_hidden_dim: 96
+kan_num_basis: 8
+kan_mode: "shared_kan"
+use_kan_score_head: false
+condition_dropout: 0.1
+transport_scale_init: 0.02
+
+use_cb_loss: true
+class_balance_loss: "balanced_softmax"
+use_transport_reg: true
+use_residual_consistency: true

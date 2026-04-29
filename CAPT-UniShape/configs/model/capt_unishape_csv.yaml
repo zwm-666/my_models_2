@@ -1,0 +1,36 @@
+# ===========================================================================
+# Model configuration -- CAPT-UniShape for CSV PEMFC data (no EIS)
+# ===========================================================================
+
+# --- Core Transformer dimensions ---
+d_model: 256
+num_layers: 4
+num_heads: 8
+dropout: 0.15
+
+# --- Multi-scale partition (for window_size=64) ---
+# op_channels is auto-updated at runtime by build_csv_dataset()
+scale_set: [8, 16, 32]
+
+# --- Branch switches ---
+use_eis_branch: false          # No EIS data in CSV
+use_condition_attention: true
+use_cross_modal: false         # Single modality, no cross-modal needed
+use_capt: true
+
+# --- EIS adapter (placeholder, not used) ---
+eis_segment_lengths: [8, 16]
+
+# --- Fusion ---
+fusion_hidden_dim: 256
+modality_dropout: 0.0
+
+# --- CAPT classification head ---
+capt_hidden_dim: 64
+temperature: 0.07
+num_classes: 3                 # Normal, Flooding, Membrane_Drying
+
+# --- Auxiliary loss switches ---
+use_cb_loss: true
+use_transport_reg: true
+use_residual_consistency: true

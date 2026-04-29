@@ -1,0 +1,49 @@
+# ===========================================================================
+# Dataset configuration -- Self-measured PEMFC data (strict session-family split)
+# ===========================================================================
+
+self_excel_path: "data/processed/测试数据.xlsx"
+self_sheet_name: "Sheet1"
+data_format: "self"
+
+# strict split by locally continuous segments inside the combined Excel file
+group_mode: "segment"
+segment_gap_seconds: 600.0
+segment_block_seconds: 600.0
+segment_label_boundary: true
+
+window_size: 32
+stride_train: 8
+stride_eval: 16
+
+test_size: 0.20
+val_size: 0.15
+augment_train: true
+
+op_channels: 216
+eis_channels: 4
+eis_freq_points: 32
+
+condition_fields:
+  - "总阻抗"
+  - "平均阻抗"
+  - "最高阻抗"
+  - "次高阻抗"
+  - "最低阻抗"
+  - "次低阻抗"
+  - "标准差"
+  - "EIS电阻实部"
+  - "EIS电阻虚部"
+  - "电堆总电压"
+  - "电堆总电流"
+  - "电堆功率"
+
+coarse_labels:
+  - "正常"
+  - "过湿"
+  - "过干"
+label_granularity: "coarse"
+
+normalize: true
+data_dir: "data"
+split_dir: "data/splits"

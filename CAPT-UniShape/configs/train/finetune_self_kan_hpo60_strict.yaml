@@ -1,0 +1,46 @@
+# ===========================================================================
+# Training configuration -- HPO60-selected CAPT-UniShape-KAN on self PEMFC data
+# Selection rule: validation Macro-F1 only; test metrics are report-only.
+# ===========================================================================
+
+_base_:
+  - "configs/dataset/self_pemfc_strict.yaml"
+  - "configs/model/capt_unishape_kan_self.yaml"
+  - "configs/experiment/default.yaml"
+
+optimizer: "adamw"
+lr: 6.12261560602803e-4
+weight_decay: 4.212412845262045e-6
+batch_size: 64
+num_workers: 0
+
+max_epochs: 80
+warmup_epochs: 5
+grad_clip: 1.0
+frozen_epochs: 0
+
+gamma1: 0.023555278841790407
+gamma2: 0.005990213464750792
+gamma3: 0.0
+beta: 0.9950909209402947
+
+patience: 18
+min_delta: 0.001
+scheduler: "cosine"
+
+use_weighted_sampler: true
+
+pretrain_checkpoint: ""
+seeds: [42, 123, 456]
+
+model_name: "capt_unishape_kan"
+head_type: "capt_kan"
+d_model: 128
+num_layers: 2
+num_heads: 2
+dropout: 0.05823379771832098
+condition_dropout: 0.29097295564859826
+kan_hidden_dim: 32
+kan_num_basis: 6
+kan_mode: "shared_kan"
+use_kan_score_head: false

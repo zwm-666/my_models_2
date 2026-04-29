@@ -1,0 +1,160 @@
+"""Run official CAPT-UniShape ablation experiments with early stopping."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+_train = importlib.import_module("train")
+load_config = _train.load_config
+run_training = _train.run_training
+
+
+ABLATIONS: dict[str, dict[str, Any]] = {
+    "full_rbf": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "description": "完整模型：官方 UniShape + EIS + 工况 + Residual KAN-Fusion + 动态 RBF 原型",
+    },
+    "no_rbf": {
+        "config": "configs/kanfusion_no_rbf.yaml",
+        "description": "去掉 RBF 动态原型头，使用 MLP 分类器",
+    },
+    "no_kan_fusion": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "overrides": {"use_residual_kan_fusion": False},
+        "description": "关闭 Residual KAN 分支，只保留融合 MLP",
+    },
+    "static_prototype": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "overrides": {"use_condition_transport": False},
+        "description": "关闭工况感知 prototype transport，只使用静态原型",
+    },
+    "no_transport_reg": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "overrides": {"alpha_transport": 0.0},
+        "description": "去掉原型迁移幅值正则",
+    },
+    "no_separation_reg": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "overrides": {"alpha_sep": 0.0},
+        "description": "去掉原型分离正则",
+    },
+    "no_eis_input": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "data_zero": ["x_eis"],
+        "description": "置零 EIS 分支，验证 EIS 输入贡献",
+    },
+    "no_condition_input": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "data_zero": ["x_cond"],
+        "description": "置零工况向量，验证工况建模贡献",
+    },
+    "stack_only": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "data_zero": ["x_eis", "x_cond"],
+        "description": "仅保留电堆运行分支",
+    },
+    "eis_cond_only": {
+        "config": "configs/rbf_kanfusion.yaml",
+        "data_zero": ["x_op"],
+        "description": "去掉电堆运行分支，仅保留 EIS + 工况",
+    },
+}
+
+
+def _make_data_variant(base_npz: Path, output_npz: Path, zero_keys: list[str]) -> Path:
+    if not zero_keys:
+        return base_npz
+    data = np.load(base_npz)
+    payload: dict[str, np.ndarray[Any, Any]] = {key: data[key].copy() for key in data.files}
+    for key in zero_keys:
+        if key not in payload:
+            raise KeyError(f"{base_npz} 中不存在 {key}")
+        payload[key] = np.zeros_like(payload[key])
+    output_npz.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output_npz, **payload)
+    return output_npz
+
+
+def _metric_row(variant: str, description: str, metrics_path: Path) -> dict[str, Any]:
+    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    test_payload = payload.get("test", payload)
+    return {
+        "variant": variant,
+        "description": description,
+        "val_accuracy": float(payload.get("accuracy", 0.0)),
+        "val_macro_f1": float(payload.get("macro_f1", 0.0)),
+        "test_accuracy": float(test_payload.get("accuracy", 0.0)),
+        "test_macro_f1": float(test_payload.get("macro_f1", 0.0)),
+        "test_inference_ms": float(test_payload.get("inference_time_per_sample_ms", 0.0)),
+        "parameter_count": int(payload.get("parameter_count", 0)),
+        "metrics_path": str(metrics_path),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="运行官方 CAPT-UniShape 消融实验")
+    parser.add_argument("--data", default="data/processed/official_self_stack_impedance_eis_w64.npz")
+    parser.add_argument("--variants", nargs="+", default=list(ABLATIONS.keys()), choices=list(ABLATIONS.keys()))
+    parser.add_argument("--output-root", default="results/official_ablation")
+    parser.add_argument("--data-root", default="data/processed/official_ablation")
+    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--min-delta", type=float, default=1e-4)
+    parser.add_argument("--refit-trainval", action=argparse.BooleanOptionalAction, default=False, help="验证集只用于选epoch，最终模型用train+val重训；默认关闭以保持验证/测试独立")
+    parser.add_argument("--min-epochs-before-stop", type=int, default=20)
+    parser.add_argument("--val-metric-smoothing", type=int, default=3)
+    args = parser.parse_args()
+
+    base_npz = ROOT / args.data
+    output_root = ROOT / args.output_root
+    data_root = ROOT / args.data_root
+    output_root.mkdir(parents=True, exist_ok=True)
+    data_root.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, Any]] = []
+    for variant in args.variants:
+        spec = ABLATIONS[variant]
+        zero_keys = list(spec.get("data_zero", []))
+        data_path = _make_data_variant(base_npz, data_root / f"{variant}.npz", zero_keys)
+        config = load_config(ROOT / str(spec["config"]))
+        for key, value in dict(spec.get("overrides", {})).items():
+            config[key] = value
+        run_dir = output_root / variant
+        config.setdefault("experiment", {})["output_dir"] = str(run_dir)
+        print(f"\n=== 消融实验: {variant} ===", flush=True)
+        print(spec["description"], flush=True)
+        run_training(
+            config=config,
+            data_path=data_path,
+            output_dir=run_dir,
+            epochs_override=args.epochs,
+            patience_override=args.patience,
+            min_delta_override=args.min_delta,
+            refit_trainval_override=args.refit_trainval,
+            min_epochs_before_stop_override=args.min_epochs_before_stop,
+            val_metric_smoothing_override=args.val_metric_smoothing,
+        )
+        rows.append(_metric_row(variant, str(spec["description"]), run_dir / "metrics.json"))
+
+    summary_path = output_root / "summary.csv"
+    with summary_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"\n已写入消融实验汇总: {summary_path}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

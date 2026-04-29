@@ -1,0 +1,55 @@
+# ===========================================================================
+# Training configuration -- Fine-tuning on self-measured PEMFC data
+# (stricter 10-minute session-family split)
+# ===========================================================================
+
+_base_:
+  - "configs/dataset/self_pemfc_strict.yaml"
+  - "configs/model/capt_unishape_self.yaml"
+  - "configs/experiment/default.yaml"
+
+# --- Optimiser ---
+optimizer: "adamw"
+lr: 3.0e-4
+weight_decay: 1.0e-4
+batch_size: 32
+num_workers: 0
+
+# --- Training schedule ---
+max_epochs: 80
+warmup_epochs: 5
+grad_clip: 1.0
+frozen_epochs: 0
+
+# --- Loss weights ---
+gamma1: 0.01
+gamma2: 0.005
+gamma3: 0.0
+beta: 0.9999
+
+# --- Early stopping ---
+patience: 15
+min_delta: 0.001
+
+# --- Learning rate scheduler ---
+scheduler: "cosine"
+
+# --- Pretrained checkpoint ---
+pretrain_checkpoint: ""
+
+# --- Sampling ---
+use_weighted_sampler: true
+
+# --- Extended evaluation ---
+evaluate_noise: true
+evaluate_small_sample: true
+evaluate_imbalance: true
+evaluate_cross_condition: true
+
+noise_snr_levels: [30, 20, 10]
+noise_missing_ratios: [0.05, 0.10, 0.20]
+label_ratios: [0.1, 0.2, 0.5, 1.0]
+imbalance_ratios: [5, 10, 20]
+
+# --- Seeds ---
+seeds: [42, 123, 456]

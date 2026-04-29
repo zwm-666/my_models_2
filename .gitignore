@@ -1,0 +1,51 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Experiment data, generated artifacts, and model weights
+CAPT-UniShape/data/
+CAPT-UniShape/result/
+CAPT-UniShape/results/
+CAPT-UniShape/outputs/
+CAPT-UniShape/figures/
+CAPT-UniShape/external/unishape/30NewDatasets/
+CAPT-UniShape/external/unishape/datapre/
+CAPT-UniShape/external/unishape/framework_pic/
+CAPT-UniShape/external/unishape/unishape_pretrain.py
+CAPT-UniShape/external/unishape/unishape_finetune.py
+CAPT-UniShape/external/unishape/unishape_zeroshot.py
+CAPT-UniShape/external/unishape/models/pretrain_mocov3.py
+CAPT-UniShape/external/unishape/models/unishapemodel_pretrain.py
+CAPT-UniShape/external/unishape/models/unishapemodel_zeroshot.py
+CAPT-UniShape/external/unishape/utils/
+CAPT-UniShape/external/unishape/UCRArchive_2018/
+*.ckpt
+*.pth
+*.pt
+*.npz
+*.npy
+*.pkl
+*.tsv
+*.xlsx
+*.xls
+
+# Packaged archives and logs
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.log
+
+# Paper/editorial files outside the runnable experiment package
+*.doc
+*.docx
+*.pdf
+agent.md
+指导文件/

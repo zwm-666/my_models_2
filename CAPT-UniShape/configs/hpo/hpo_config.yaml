@@ -1,0 +1,56 @@
+# ===========================================================================
+# HPO Configuration -- HF-MTPE-ASHA
+# ===========================================================================
+# Hierarchical Fidelity Multi-variate TPE with Asynchronous Successive
+# Halving for automated hyperparameter optimisation of CAPT-UniShape.
+
+# Base configs (CSV path -- the currently runnable data pipeline)
+_base_:
+  - "configs/dataset/csv_pemfc.yaml"
+  - "configs/model/capt_unishape_csv.yaml"
+  - "configs/experiment/default.yaml"
+
+# --- Study settings ---
+study_name: "capt_unishape_hpo"
+n_trials: 100
+n_warmup_trials: 20       # Random trials before TPE kicks in
+pruner: "asha"            # asha | hyperband | median
+sampler: "tpe_multivariate"
+
+# --- Composite objective weights ---
+#   Final score = w1*macro_f1 + w2*minority_recall
+#               + w3*cross_condition_f1 + w4*balanced_acc
+obj_macro_f1: 0.55
+obj_minority_recall: 0.20
+obj_cross_condition_f1: 0.15
+obj_balanced_acc: 0.10
+
+# --- Multi-fidelity stages ---
+# Each stage trains on a fraction of data for a limited number of epochs.
+# Trials that survive early stages are promoted to the next stage.
+fidelity_stages:
+  - data_ratio: 0.3
+    max_epochs: 15
+    backbone_frozen: true
+  - data_ratio: 0.6
+    max_epochs: 35
+    backbone_frozen: false
+  - data_ratio: 1.0
+    max_epochs: 100
+    backbone_frozen: false
+
+# --- Convergence detection ---
+convergence_patience: 30   # Stop study if best value has not improved
+convergence_threshold: 0.002
+
+# --- Search space (defined programmatically in hpo_objective.py) ---
+# The following ranges are indicative; the actual suggest calls live in code:
+#   d_model:           [128, 256, 512]
+#   num_layers:        [2, 6]
+#   num_heads:         [4, 8]
+#   dropout:           [0.05, 0.30]
+#   temperature:       [0.03, 0.20]  (log scale)
+#   modality_dropout:  [0.0,  0.30]
+#   lr:                [1e-5, 1e-3]  (log scale)
+#   weight_decay:      [1e-6, 1e-3]  (log scale)
+#   batch_size:        [32, 64, 128]

@@ -1,0 +1,42 @@
+# ===========================================================================
+# Dataset configuration -- PEMFC Fault Classification
+# ===========================================================================
+# Operational time series and EIS spectra settings for the PEMFCDataset.
+
+# --- Time series ---
+window_size: 256          # Number of time steps per sample window
+sampling_rate: 1.0        # Relative sampling rate (1.0 = original)
+op_channels: 6            # voltage, current, temp, pressure, flow, humidity
+
+# --- EIS (Electrochemical Impedance Spectroscopy) ---
+eis_channels: 4           # Re(Z), -Im(Z), |Z|, angle(Z)
+eis_freq_points: 64       # Number of discrete frequency points
+
+# --- Operating conditions ---
+condition_fields:
+  - "load"
+  - "current_density"
+  - "temperature"
+  - "humidity"
+  - "stoichiometry"
+
+# --- Split strategy ---
+split_strategy: "stratified"   # stratified | cross_condition | cross_source
+domain_field: "source"         # Field name used for domain identification
+
+# --- Labels ---
+coarse_labels:
+  - "normal"
+  - "flooding"
+  - "drying"
+  - "starvation"
+  - "leakage"
+  - "other"
+label_granularity: "coarse"
+
+# --- Normalisation ---
+normalize: true
+
+# --- Paths (relative to project root) ---
+data_dir: "data"
+split_dir: "data/splits"

@@ -1,0 +1,40 @@
+model_name: official_capt_unishape_kanfusion_no_rbf
+use_rbf_head: false
+use_residual_kan_fusion: true
+
+c_op: 6
+op_seq_len: 256
+c_eis: 4
+eis_seq_len: 128
+d_cond: 10
+num_classes: 3
+
+d_model: 128
+hidden_dim: 256
+fusion_hidden_dim: 256
+classifier_hidden_dim: 256
+dropout: 0.1
+
+freeze_unishape_backbone: false
+channel_aggregation: attention
+scale_len: 3
+
+kan_bottleneck_dim: 32
+kan_num_basis: 8
+kan_lambda: 0.1
+learnable_kan_lambda: true
+alpha_kan: 0.0001
+label_smoothing: 0.0
+
+experiment:
+  output_dir: results/official_unishape_kanfusion_no_rbf
+  seeds: [42]
+  batch_size: 8
+  epochs: 80
+  patience: 10
+  min_delta: 0.0001
+  refit_trainval: false
+  min_epochs_before_stop: 20
+  val_metric_smoothing: 1
+  lr: 0.0001
+  weight_decay: 0.0001
