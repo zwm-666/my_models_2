@@ -122,6 +122,7 @@ def _build_stack_windows(
     min_train_stride: int,
     max_train_stride: int,
     class_stride_power: float,
+    group_split_strategy: str,
 ) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], dict[str, object]]:
     df = pd.read_excel(Path(excel_path), sheet_name=sheet_name, engine="openpyxl")
     expected = set(STACK_COLS + COND_COLS + [TIME_COL, LABEL_COL])
@@ -141,7 +142,7 @@ def _build_stack_windows(
     groups = np.asarray(df["__group_key__"].unique())
     group_label_map = df.groupby("__group_key__")[LABEL_COL].first()
     group_labels = np.array([group_label_map[g] for g in groups])
-    g_tr, g_va, g_te = _group_split(groups, group_labels, test_size, val_size, random_state)
+    g_tr, g_va, g_te = _group_split(groups, group_labels, test_size, val_size, random_state, strategy=group_split_strategy)
     g_tr_set = set(g_tr.tolist())
     g_va_set = set(g_va.tolist())
     g_te_set = set(g_te.tolist())
@@ -228,6 +229,7 @@ def _build_stack_windows(
         "cond_cols": COND_COLS,
         "test_size_ratio": test_size,
         "val_size_ratio_within_train_pool": val_size,
+        "group_split_strategy": group_split_strategy,
     }
     return x_op, x_cond, labels, split, meta
 
@@ -253,6 +255,7 @@ def build_npz(
     min_train_stride: int | None = None,
     max_train_stride: int | None = None,
     class_stride_power: float = 1.0,
+    group_split_strategy: str = "three_way",
 ) -> dict[str, object]:
     resolved_min_train_stride = int(min_train_stride if min_train_stride is not None else max(1, stride_train // 2))
     resolved_max_train_stride = int(max_train_stride if max_train_stride is not None else max(stride_train, stride_train * 2))
@@ -278,6 +281,7 @@ def build_npz(
             min_train_stride=resolved_min_train_stride,
             max_train_stride=resolved_max_train_stride,
             class_stride_power=class_stride_power,
+            group_split_strategy=group_split_strategy,
         )
     elif op_source == "cells":
         if class_aware_train_stride:
@@ -297,6 +301,7 @@ def build_npz(
             segment_block_seconds=segment_block_seconds,
             segment_label_boundary=segment_label_boundary,
             feature_subset=feature_subset,
+            group_split_strategy=group_split_strategy,
         )
         train_op, train_cond, train_y = _dataset_arrays(train_ds)
         val_op, val_cond, val_y = _dataset_arrays(val_ds)
@@ -346,6 +351,7 @@ def build_npz(
         "min_train_stride": resolved_min_train_stride,
         "max_train_stride": resolved_max_train_stride,
         "class_stride_power": class_stride_power,
+        "group_split_strategy": group_split_strategy,
         "feature_subset": feature_subset,
         "op_source": op_source,
         "source_meta": {
@@ -359,6 +365,7 @@ def build_npz(
             "train_stride_by_label": meta.get("train_stride_by_label"),
             "test_size_ratio": test_size,
             "val_size_ratio_within_train_pool": val_size,
+            "group_split_strategy": meta.get("group_split_strategy", group_split_strategy),
         },
     }
     summary_path = output.with_suffix(".summary.json")
@@ -388,6 +395,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-train-stride", type=int, default=None, help="Minimum class-aware training stride; default=stride_train//2")
     parser.add_argument("--max-train-stride", type=int, default=None, help="Maximum class-aware training stride; default=stride_train*2")
     parser.add_argument("--class-stride-power", type=float, default=1.0, help="Power for class-count-to-stride scaling")
+    parser.add_argument("--group-split-strategy", choices=["three_way", "two_stage"], default="three_way", help="Group-level split strategy; three_way preserves global val/test proportions more directly")
     return parser.parse_args()
 
 
@@ -414,6 +422,7 @@ def main() -> None:
         min_train_stride=args.min_train_stride,
         max_train_stride=args.max_train_stride,
         class_stride_power=args.class_stride_power,
+        group_split_strategy=args.group_split_strategy,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 

@@ -193,6 +193,34 @@ def _dataset_label_counts(
     return {int(label): int(count) for label, count in zip(unique, counts)}
 
 
+def _compute_class_weights(
+    dataset: Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    num_classes: int,
+    device: torch.device,
+    mode: str = "balanced",
+) -> torch.Tensor | None:
+    """Compute inverse-frequency class weights from the training split."""
+    normalized_mode = str(mode).lower()
+    if normalized_mode in {"", "none", "false", "off", "disabled"}:
+        return None
+    if normalized_mode not in {"balanced", "inverse_frequency"}:
+        raise ValueError(f"Unsupported class_weighting mode: {mode}")
+    counts_map = _dataset_label_counts(dataset)
+    counts = torch.tensor(
+        [float(counts_map.get(class_id, 0)) for class_id in range(int(num_classes))],
+        dtype=torch.float32,
+        device=device,
+    )
+    present = counts > 0
+    if not bool(present.any()):
+        return None
+    weights = torch.zeros_like(counts)
+    total = counts[present].sum()
+    weights[present] = total / (float(present.sum().item()) * counts[present].clamp_min(1.0))
+    weights[present] = weights[present] / weights[present].mean().clamp_min(1e-6)
+    return weights
+
+
 def evaluate_loader(
     model: torch.nn.Module,
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
@@ -237,6 +265,7 @@ def evaluate_loader(
     return {
         "accuracy": float(accuracy_score(labels_np, preds)),
         "macro_f1": float(report["macro avg"]["f1-score"]),
+        "weighted_f1": float(report["weighted avg"]["f1-score"]),
         "classification_report": report,
         "per_class_f1": per_class_f1,
         "confusion_matrix": confusion_matrix(labels_np, preds, labels=label_ids).tolist(),
@@ -251,6 +280,15 @@ def _write_confusion_matrix(path: Path, metrics: dict[str, Any]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerows(metrics["confusion_matrix"])
+
+
+def _write_normalized_confusion_matrix(path: Path, metrics: dict[str, Any]) -> None:
+    matrix = np.asarray(metrics["confusion_matrix"], dtype=np.float64)
+    row_sum = np.maximum(matrix.sum(axis=1, keepdims=True), 1.0)
+    normalized = matrix / row_sum
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerows(normalized.tolist())
 
 
 def _write_predictions(path: Path, metrics: dict[str, Any]) -> None:
@@ -275,13 +313,16 @@ def save_outputs(output_dir: Path, metrics: dict[str, Any], param_count: int) ->
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as handle:
         json.dump(metrics_to_save, handle, indent=2, ensure_ascii=False)
     _write_confusion_matrix(output_dir / "val_confusion_matrix.csv", metrics)
+    _write_normalized_confusion_matrix(output_dir / "val_confusion_matrix_normalized.csv", metrics)
     _write_predictions(output_dir / "val_predictions.csv", metrics)
     _write_classification_report(output_dir / "val_classification_report.csv", metrics)
     _write_confusion_matrix(output_dir / "confusion_matrix.csv", metrics)
+    _write_normalized_confusion_matrix(output_dir / "confusion_matrix_normalized.csv", metrics)
     _write_predictions(output_dir / "predictions.csv", metrics)
     _write_classification_report(output_dir / "classification_report.csv", metrics)
     if "test" in metrics and isinstance(metrics["test"], dict):
         _write_confusion_matrix(output_dir / "test_confusion_matrix.csv", metrics["test"])
+        _write_normalized_confusion_matrix(output_dir / "test_confusion_matrix_normalized.csv", metrics["test"])
         _write_predictions(output_dir / "test_predictions.csv", metrics["test"])
         _write_classification_report(output_dir / "test_classification_report.csv", metrics["test"])
     test_metrics = metrics.get("test") if isinstance(metrics.get("test"), dict) else None
@@ -289,9 +330,11 @@ def save_outputs(output_dir: Path, metrics: dict[str, Any], param_count: int) ->
         fieldnames = [
             "val_accuracy",
             "val_macro_f1",
+            "val_weighted_f1",
             "val_inference_ms",
             "test_accuracy",
             "test_macro_f1",
+            "test_weighted_f1",
             "test_inference_ms",
             "parameter_count",
         ]
@@ -300,9 +343,11 @@ def save_outputs(output_dir: Path, metrics: dict[str, Any], param_count: int) ->
         writer.writerow({
             "val_accuracy": metrics_to_save["accuracy"],
             "val_macro_f1": metrics_to_save["macro_f1"],
+            "val_weighted_f1": metrics_to_save["weighted_f1"],
             "val_inference_ms": metrics_to_save["inference_time_per_sample_ms"],
             "test_accuracy": test_metrics.get("accuracy", "") if test_metrics else "",
             "test_macro_f1": test_metrics.get("macro_f1", "") if test_metrics else "",
+            "test_weighted_f1": test_metrics.get("weighted_f1", "") if test_metrics else "",
             "test_inference_ms": test_metrics.get("inference_time_per_sample_ms", "") if test_metrics else "",
             "parameter_count": param_count,
         })
@@ -313,13 +358,20 @@ def train_one_epoch(
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    class_weights: torch.Tensor | None = None,
 ) -> float:
     model.train()
     total = 0.0
     seen = 0
     for x_op, x_eis, x_cond, labels in loader:
         optimizer.zero_grad(set_to_none=True)
-        logits, loss_dict = model(x_op.to(device), x_eis.to(device), x_cond.to(device), labels.to(device))
+        logits, loss_dict = model(
+            x_op.to(device),
+            x_eis.to(device),
+            x_cond.to(device),
+            labels.to(device),
+            class_weights=class_weights,
+        )
         del logits
         loss = loss_dict["total_loss"]
         if loss is None:
@@ -345,6 +397,7 @@ def run_training(
     refit_trainval_override: bool | None = None,
     min_epochs_before_stop_override: int | None = None,
     val_metric_smoothing_override: int | None = None,
+    class_weighting_override: str | None = None,
 ) -> dict[str, Any]:
     experiment = config.get("experiment", {})
     seed = int((experiment.get("seeds") or [42])[0])
@@ -408,6 +461,12 @@ def run_training(
     print(f"输出目录: {target_dir}", flush=True)
     model = build_experiment_model(config, device, op_pretrained=op_pretrained, eis_pretrained=eis_pretrained)
     optimizer = build_optimizer(model, experiment)
+    class_weighting = str(class_weighting_override if class_weighting_override is not None else experiment.get("class_weighting", "balanced"))
+    class_weights = _compute_class_weights(train_ds, int(config["num_classes"]), device, mode=class_weighting)
+    if class_weights is None:
+        print("类别加权 CE: disabled", flush=True)
+    else:
+        print(f"类别加权 CE: mode={class_weighting}, weights={class_weights.detach().cpu().tolist()}", flush=True)
     best_selection_score = -1.0
     best_raw_macro_f1 = -1.0
     best_state = None
@@ -415,7 +474,7 @@ def run_training(
     epochs_without_improvement = 0
     history: list[dict[str, float]] = []
     for epoch in range(max_epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, class_weights=class_weights)
         metrics = evaluate_loader(model, val_loader, device, num_classes=int(config["num_classes"]))
         recent_macro_f1 = [row["val_macro_f1"] for row in history[-(val_metric_smoothing - 1):]] if val_metric_smoothing > 1 else []
         recent_macro_f1.append(float(metrics["macro_f1"]))
@@ -477,8 +536,9 @@ def run_training(
         trainval_loader = make_loader(trainval_ds, batch_size=batch_size, shuffle=True, seed=seed + 100_003)
         final_model = build_experiment_model(config, device, op_pretrained=op_pretrained, eis_pretrained=eis_pretrained)
         final_optimizer = build_optimizer(final_model, experiment)
+        final_class_weights = _compute_class_weights(trainval_ds, int(config["num_classes"]), device, mode=class_weighting)
         for refit_epoch in range(selected_epochs):
-            refit_loss = train_one_epoch(final_model, trainval_loader, final_optimizer, device)
+            refit_loss = train_one_epoch(final_model, trainval_loader, final_optimizer, device, class_weights=final_class_weights)
             print(
                 f"Refit {refit_epoch + 1:03d}/{selected_epochs:03d} | trainval_loss={refit_loss:.6f}",
                 flush=True,
@@ -488,6 +548,8 @@ def run_training(
     final_metrics["selection_val"] = selection_val_metrics
     final_metrics["model_selection_rule"] = model_selection_rule
     final_metrics["refit_trainval"] = bool(refit_trainval)
+    final_metrics["class_weighting"] = class_weighting
+    final_metrics["class_weights"] = class_weights.detach().cpu().tolist() if class_weights is not None else None
     if refit_trainval:
         final_metrics["refit_val_in_sample"] = evaluate_loader(final_model, val_loader, device, num_classes=int(config["num_classes"]))
     if test_ds is not None:
@@ -519,6 +581,7 @@ def run_training(
                     "best_val_macro_f1": best_raw_macro_f1,
                     "best_selection_score": best_selection_score,
                     "epochs_ran": len(history),
+                    "class_weighting": class_weighting,
                 },
             },
             target_dir / "best_val.ckpt",
@@ -541,6 +604,7 @@ def run_training(
                 "epochs_ran": len(history),
                 "model_selection_rule": model_selection_rule,
                 "refit_trainval": bool(refit_trainval),
+                "class_weighting": class_weighting,
             },
         },
         target_dir / "best.ckpt",
@@ -572,6 +636,7 @@ def parse_args(args: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--refit-trainval", action=argparse.BooleanOptionalAction, default=None, help="Select epoch on val, then refit final model on train+val")
     parser.add_argument("--min-epochs-before-stop", type=int, default=None, help="Do not trigger early stopping before this epoch")
     parser.add_argument("--val-metric-smoothing", type=int, default=None, help="Moving average window for val macro-F1 selection score")
+    parser.add_argument("--class-weighting", choices=["balanced", "inverse_frequency", "none"], default=None, help="Class weighting mode for neural-network CE loss")
     return parser.parse_args(args)
 
 
@@ -590,6 +655,7 @@ def main() -> None:
         args.refit_trainval,
         args.min_epochs_before_stop,
         args.val_metric_smoothing,
+        args.class_weighting,
     )
 
 

@@ -238,6 +238,7 @@ def _classification_metrics(
     return {
         "accuracy": float(accuracy_score(labels, preds)),
         "macro_f1": float(report["macro avg"]["f1-score"]),
+        "weighted_f1": float(report["weighted avg"]["f1-score"]),
         "classification_report": report,
         "per_class_f1": per_class_f1,
         "confusion_matrix": confusion_matrix(labels, preds, labels=label_ids).tolist(),
@@ -255,6 +256,15 @@ def _write_classification_report(path: Path, metrics: dict[str, Any]) -> None:
         writer.writerows(metrics.get("per_class_f1", []))
 
 
+def _write_normalized_confusion_matrix(path: Path, metrics: dict[str, Any]) -> None:
+    matrix = np.asarray(metrics["confusion_matrix"], dtype=np.float64)
+    row_sum = np.maximum(matrix.sum(axis=1, keepdims=True), 1.0)
+    normalized = matrix / row_sum
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerows(normalized.tolist())
+
+
 def _save_result(output_dir: Path, val_metrics: dict[str, Any], test_metrics: dict[str, Any], param_count: int) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = dict(val_metrics)
@@ -268,9 +278,11 @@ def _save_result(output_dir: Path, val_metrics: dict[str, Any], test_metrics: di
             fieldnames=[
                 "val_accuracy",
                 "val_macro_f1",
+                "val_weighted_f1",
                 "val_inference_ms",
                 "test_accuracy",
                 "test_macro_f1",
+                "test_weighted_f1",
                 "test_inference_ms",
                 "parameter_count",
             ],
@@ -280,9 +292,11 @@ def _save_result(output_dir: Path, val_metrics: dict[str, Any], test_metrics: di
             {
                 "val_accuracy": val_metrics["accuracy"],
                 "val_macro_f1": val_metrics["macro_f1"],
+                "val_weighted_f1": val_metrics["weighted_f1"],
                 "val_inference_ms": val_metrics["inference_time_per_sample_ms"],
                 "test_accuracy": test_metrics["accuracy"],
                 "test_macro_f1": test_metrics["macro_f1"],
+                "test_weighted_f1": test_metrics["weighted_f1"],
                 "test_inference_ms": test_metrics["inference_time_per_sample_ms"],
                 "parameter_count": int(param_count),
             }
@@ -290,9 +304,11 @@ def _save_result(output_dir: Path, val_metrics: dict[str, Any], test_metrics: di
     with (output_dir / "confusion_matrix.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerows(test_metrics["confusion_matrix"])
+    _write_normalized_confusion_matrix(output_dir / "confusion_matrix_normalized.csv", test_metrics)
     with (output_dir / "val_confusion_matrix.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerows(val_metrics["confusion_matrix"])
+    _write_normalized_confusion_matrix(output_dir / "val_confusion_matrix_normalized.csv", val_metrics)
     _write_classification_report(output_dir / "classification_report.csv", test_metrics)
     _write_classification_report(output_dir / "test_classification_report.csv", test_metrics)
     _write_classification_report(output_dir / "val_classification_report.csv", val_metrics)
@@ -321,6 +337,7 @@ def _metric_row(ratio: str, model_key: str, metrics_path: Path) -> dict[str, Any
         "val_macro_f1": float(payload.get("macro_f1", 0.0)),
         "test_accuracy": float(test_payload.get("accuracy", 0.0)),
         "test_macro_f1": float(test_payload.get("macro_f1", 0.0)),
+        "test_weighted_f1": float(test_payload.get("weighted_f1", 0.0)),
         "test_inference_ms": float(test_payload.get("inference_time_per_sample_ms", 0.0)),
         "test_source": test_source,
         "parameter_count": int(payload.get("parameter_count", 0)),
@@ -474,7 +491,13 @@ def run_torch_baseline(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = _build_torch_model(model_key, train_ds, num_classes, hidden_dim, d_model, num_layers, dropout).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    criterion = nn.CrossEntropyLoss()
+    train_counts = torch.bincount(train_ds.labels, minlength=num_classes).to(device=device, dtype=torch.float32)
+    present = train_counts > 0
+    class_weights = torch.zeros_like(train_counts)
+    class_weights[present] = train_counts[present].sum() / (float(present.sum().item()) * train_counts[present].clamp_min(1.0))
+    class_weights[present] = class_weights[present] / class_weights[present].mean().clamp_min(1e-6)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    print(f"{model_key}: 类别加权 CE weights={class_weights.detach().cpu().tolist()}", flush=True)
     best_state: dict[str, torch.Tensor] | None = None
     best_selection_score = -1.0
     best_epoch = 0
@@ -588,6 +611,7 @@ def main() -> None:
     parser.add_argument("--segment-gap-seconds", type=float, default=600.0)
     parser.add_argument("--segment-block-seconds", type=float, default=240.0)
     parser.add_argument("--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--group-split-strategy", choices=["three_way", "two_stage"], default="three_way", help="分组划分策略；three_way 直接按全局 train/val/test 比例分层切分")
     parser.add_argument("--val-size", type=float, default=0.25)
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--patience", type=int, default=10)
@@ -640,6 +664,7 @@ def main() -> None:
             min_train_stride=args.min_train_stride,
             max_train_stride=args.max_train_stride,
             class_stride_power=args.class_stride_power,
+            group_split_strategy=args.group_split_strategy,
         )
         for model_key in args.models:
             run_dir = output_root / ratio / model_key
@@ -690,7 +715,7 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
     test_summary_path = output_root / "test_summary.csv"
-    test_fieldnames = ["ratio", "model", "category", "test_accuracy", "test_macro_f1", "test_inference_ms", "parameter_count", "metrics_path"]
+    test_fieldnames = ["ratio", "model", "category", "test_accuracy", "test_macro_f1", "test_weighted_f1", "test_inference_ms", "parameter_count", "metrics_path"]
     with test_summary_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=test_fieldnames)
         writer.writeheader()

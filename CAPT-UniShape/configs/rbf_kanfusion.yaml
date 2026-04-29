@@ -46,5 +46,6 @@ experiment:
   refit_trainval: false
   min_epochs_before_stop: 20
   val_metric_smoothing: 1
+  class_weighting: balanced
   lr: 0.0001
   weight_decay: 0.0001

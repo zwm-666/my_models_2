@@ -97,6 +97,7 @@ class OfficialCAPTUniShapeKANFusionNoRBF(nn.Module):
         x_eis: torch.Tensor,
         x_cond: torch.Tensor,
         labels: torch.Tensor | None = None,
+        class_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
         z_op = self.op_backbone.extract_feature(x_op)
         z_eis = self.eis_backbone.extract_feature(x_eis)
@@ -117,7 +118,7 @@ class OfficialCAPTUniShapeKANFusionNoRBF(nn.Module):
             "lambda_kan": fusion_aux["lambda_kan"],
         }
         if labels is not None:
-            ce_loss = F.cross_entropy(logits, labels, label_smoothing=self.label_smoothing)
+            ce_loss = F.cross_entropy(logits, labels, weight=class_weights, label_smoothing=self.label_smoothing)
             loss_dict["ce_loss"] = ce_loss
             loss_dict["total_loss"] = ce_loss + self.alpha_kan * fusion_aux["kan_regularization"]
         return logits, loss_dict

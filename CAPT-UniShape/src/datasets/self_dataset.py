@@ -136,6 +136,7 @@ def _group_split(
     test_size: float,
     val_size: float,
     random_state: int,
+    strategy: str = "two_stage",
 ) -> Tuple[NDArray[np.object_], NDArray[np.object_], NDArray[np.object_]]:
     """Split unique group IDs into train/val/test, stratified by label.
 
@@ -151,6 +152,44 @@ def _group_split(
     -------
     g_train, g_val, g_test : arrays of group identifiers
     """
+    normalized_strategy = str(strategy).lower()
+    if normalized_strategy == "three_way":
+        rng = np.random.default_rng(int(random_state))
+        train_groups: List[object] = []
+        val_groups: List[object] = []
+        test_groups: List[object] = []
+        global_val_size = float(val_size) * max(0.0, 1.0 - float(test_size))
+        for label in sorted(np.unique(group_labels).tolist()):
+            class_groups = groups[group_labels == label].copy()
+            rng.shuffle(class_groups)
+            n_groups = int(len(class_groups))
+            if n_groups == 1:
+                train_groups.extend(class_groups.tolist())
+                continue
+            n_test = int(round(n_groups * float(test_size)))
+            n_val = int(round(n_groups * global_val_size))
+            if float(test_size) > 0 and n_groups >= 2:
+                n_test = max(1, n_test)
+            if global_val_size > 0 and n_groups >= 3:
+                n_val = max(1, n_val)
+            if n_test + n_val >= n_groups:
+                overflow = n_test + n_val - n_groups + 1
+                reduce_val = min(n_val, overflow)
+                n_val -= reduce_val
+                overflow -= reduce_val
+                if overflow > 0:
+                    n_test = max(0, n_test - overflow)
+            test_groups.extend(class_groups[:n_test].tolist())
+            val_groups.extend(class_groups[n_test : n_test + n_val].tolist())
+            train_groups.extend(class_groups[n_test + n_val :].tolist())
+        if not train_groups or not val_groups or not test_groups:
+            raise ValueError(
+                "three_way split produced an empty split; reduce val/test ratio or use strategy='two_stage' for this dataset"
+            )
+        return np.asarray(train_groups), np.asarray(val_groups), np.asarray(test_groups)
+    if normalized_strategy != "two_stage":
+        raise ValueError(f"Unsupported group split strategy: {strategy}")
+
     g_tv, g_te = train_test_split(
         groups,
         test_size=test_size,
@@ -230,6 +269,7 @@ def build_self_datasets(
     segment_block_seconds: float = 600.0,
     segment_label_boundary: bool = True,
     feature_subset: str = "full",
+    group_split_strategy: str = "two_stage",
 ) -> Tuple[CSVFuelCellDataset, CSVFuelCellDataset, CSVFuelCellDataset, Dict[str, Any]]:
     """Load self-measured Excel → group split → window → datasets.
 
@@ -286,7 +326,7 @@ def build_self_datasets(
 
     # Stratified group split
     g_tr, g_va, g_te = _group_split(
-        groups, group_labels, test_size, val_size, random_state,
+        groups, group_labels, test_size, val_size, random_state, strategy=group_split_strategy,
     )
     logger.info(
         "Group split: %d train / %d val / %d test",
@@ -408,6 +448,7 @@ def build_self_datasets(
         "n_groups_val": len(g_va),
         "n_groups_test": len(g_te),
         "split_strategy": f"group_stratified_by_{split_mode}",
+        "group_split_strategy": group_split_strategy,
         "group_values_train": [str(g) for g in sorted(g_tr_set)],
         "group_values_val": [str(g) for g in sorted(g_va_set)],
         "group_values_test": [str(g) for g in sorted(g_te_set)],

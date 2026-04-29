@@ -123,6 +123,7 @@ def _metric_row(
         "noise_targets": "+".join(noise_targets),
         "test_accuracy": float(payload.get("accuracy", 0.0)),
         "test_macro_f1": float(payload.get("macro_f1", 0.0)),
+        "test_weighted_f1": float(payload.get("weighted_f1", 0.0)),
         "test_inference_ms": float(payload.get("inference_time_per_sample_ms", 0.0)),
         "parameter_count": int(payload.get("parameter_count", 0)),
         "data_path": str(data_path),
@@ -147,6 +148,7 @@ def main() -> None:
     parser.add_argument("--segment-gap-seconds", type=float, default=600.0)
     parser.add_argument("--segment-block-seconds", type=float, default=240.0)
     parser.add_argument("--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--group-split-strategy", choices=["three_way", "two_stage"], default="three_way", help="分组划分策略；three_way 直接按全局 train/val/test 比例分层切分")
     parser.add_argument("--val-size", type=float, default=0.25)
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--patience", type=int, default=10)
@@ -187,6 +189,7 @@ def main() -> None:
         min_train_stride=args.min_train_stride,
         max_train_stride=args.max_train_stride,
         class_stride_power=args.class_stride_power,
+        group_split_strategy=args.group_split_strategy,
     )
 
     rows: list[dict[str, Any]] = []
