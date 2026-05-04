@@ -31,8 +31,8 @@ def test_infers_old_mea_from_original_dta_directory() -> None:
 def test_summarize_processed_csv_counts_rows_columns_and_numeric_quality(tmp_path: Path) -> None:
     csv_path = tmp_path / "Normal_Voltage_Response.csv"
     csv_path.write_text(
-        "0.1,0.2,0.3\n"
-        "0.2,0.4,0.6\n",
+        "0.1,0.2,1\n"
+        "0.2,0.4,1\n",
         encoding="utf-8",
     )
 
@@ -40,7 +40,9 @@ def test_summarize_processed_csv_counts_rows_columns_and_numeric_quality(tmp_pat
 
     assert summary["row_count"] == 2
     assert summary["column_count"] == 3
+    assert summary["curve_column_count"] == 2
+    assert summary["trailing_label_values"] == [1]
     assert summary["sampled_rows"] == 2
     assert summary["finite_ratio"] == pytest.approx(1.0)
     assert summary["value_min"] == pytest.approx(0.1)
-    assert summary["value_max"] == pytest.approx(0.6)
+    assert summary["value_max"] == pytest.approx(0.4)
