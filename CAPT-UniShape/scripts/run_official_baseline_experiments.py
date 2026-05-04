@@ -105,7 +105,12 @@ def _make_train_subset_npz(base_npz: Path, output_npz: Path, train_fraction: flo
     payload["split"] = split[selected].copy()
     output_npz.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output_npz, **payload)
-    summary = {
+    split_label_counts = {
+        "train": _label_count_dict(labels[selected][payload["split"] == 0]),
+        "val": _label_count_dict(labels[selected][payload["split"] == 1]),
+        "test": _label_count_dict(labels[selected][payload["split"] == 2]),
+    }
+    summary: dict[str, Any] = {
         "source_npz": str(base_npz),
         "output_path": str(output_npz),
         "split_protocol": "fixed_test_train_subset",
@@ -114,11 +119,18 @@ def _make_train_subset_npz(base_npz: Path, output_npz: Path, train_fraction: flo
         "train_size": int((payload["split"] == 0).sum()),
         "val_size": int((payload["split"] == 1).sum()),
         "test_size": int((payload["split"] == 2).sum()),
-        "split_label_counts": {
-            "train": _label_count_dict(labels[selected][payload["split"] == 0]),
-            "val": _label_count_dict(labels[selected][payload["split"] == 1]),
-            "test": _label_count_dict(labels[selected][payload["split"] == 2]),
+        "split_label_counts": split_label_counts,
+    }
+    original_train_counts = _label_count_dict(labels[train_indices])
+    subset_train_counts = split_label_counts["train"]
+    summary["train_subset_diagnostics"] = {
+        "original_train_counts": original_train_counts,
+        "subset_train_counts": subset_train_counts,
+        "per_class_retained_fraction": {
+            label: float(subset_train_counts.get(label, 0) / max(count, 1))
+            for label, count in original_train_counts.items()
         },
+        "min_train_class_support": min(subset_train_counts.values()) if subset_train_counts else 0,
     }
     output_npz.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return output_npz
@@ -333,11 +345,25 @@ def _write_normalized_confusion_matrix(path: Path, metrics: dict[str, Any]) -> N
         writer.writerows(normalized.tolist())
 
 
-def _save_result(output_dir: Path, val_metrics: dict[str, Any], test_metrics: dict[str, Any], param_count: int) -> Path:
+def _save_result(
+    output_dir: Path,
+    val_metrics: dict[str, Any],
+    test_metrics: dict[str, Any],
+    param_count: int,
+    extra_payload: dict[str, Any] | None = None,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = dict(val_metrics)
     payload["test"] = test_metrics
     payload["parameter_count"] = int(param_count)
+    payload["artifact_semantics"] = {
+        "top_level_metrics": "selection_validation",
+        "non_prefixed_confusion_matrix_csv": "test_backward_compatibility",
+        "test_prefixed_files": "authoritative_test_artifacts",
+        "val_prefixed_files": "selection_validation_artifacts",
+    }
+    if extra_payload:
+        payload.update(extra_payload)
     metrics_path = output_dir / "metrics.json"
     metrics_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     with (output_dir / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -373,6 +399,10 @@ def _save_result(output_dir: Path, val_metrics: dict[str, Any], test_metrics: di
         writer = csv.writer(handle)
         writer.writerows(test_metrics["confusion_matrix"])
     _write_normalized_confusion_matrix(output_dir / "confusion_matrix_normalized.csv", test_metrics)
+    with (output_dir / "test_confusion_matrix.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerows(test_metrics["confusion_matrix"])
+    _write_normalized_confusion_matrix(output_dir / "test_confusion_matrix_normalized.csv", test_metrics)
     with (output_dir / "val_confusion_matrix.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerows(val_metrics["confusion_matrix"])
@@ -381,6 +411,11 @@ def _save_result(output_dir: Path, val_metrics: dict[str, Any], test_metrics: di
     _write_classification_report(output_dir / "test_classification_report.csv", test_metrics)
     _write_classification_report(output_dir / "val_classification_report.csv", val_metrics)
     with (output_dir / "predictions.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["sample_index", "label", "prediction"])
+        for index, (label, pred) in enumerate(zip(test_metrics["labels"], test_metrics["predictions"])):
+            writer.writerow([index, label, pred])
+    with (output_dir / "test_predictions.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["sample_index", "label", "prediction"])
         for index, (label, pred) in enumerate(zip(test_metrics["labels"], test_metrics["predictions"])):
@@ -483,22 +518,33 @@ def run_ml_baseline(model_key: str, npz_path: Path, output_dir: Path, seed: int,
     x_val, y_val = _flatten_split(npz_path, split_value=1)
     x_test, y_test = _flatten_split(npz_path, split_value=2)
     model = _build_ml_model(model_key, seed=seed, rf_estimators=rf_estimators)
+    model.fit(x_train, y_train)
+    start = time.perf_counter()
+    selection_val_preds = model.predict(x_val)
+    selection_val_elapsed = time.perf_counter() - start
+    selection_val_metrics = _classification_metrics(y_val, selection_val_preds, selection_val_elapsed, num_classes)
     if refit_trainval:
         x_fit = np.concatenate([x_train, x_val], axis=0)
         y_fit = np.concatenate([y_train, y_val], axis=0)
+        model = _build_ml_model(model_key, seed=seed, rf_estimators=rf_estimators)
         model.fit(x_fit, y_fit)
-    else:
-        model.fit(x_train, y_train)
 
     start = time.perf_counter()
-    val_preds = model.predict(x_val)
-    val_elapsed = time.perf_counter() - start
+    refit_val_preds = model.predict(x_val)
+    refit_val_elapsed = time.perf_counter() - start
     start = time.perf_counter()
     test_preds = model.predict(x_test)
     test_elapsed = time.perf_counter() - start
-    val_metrics = _classification_metrics(y_val, val_preds, val_elapsed, num_classes)
+    refit_val_metrics = _classification_metrics(y_val, refit_val_preds, refit_val_elapsed, num_classes)
     test_metrics = _classification_metrics(y_test, test_preds, test_elapsed, num_classes)
-    return _save_result(output_dir, val_metrics, test_metrics, _ml_parameter_count(model))
+    extra_payload = {
+        "selection_val": selection_val_metrics,
+        "refit_trainval": bool(refit_trainval),
+        "model_selection_rule": "train_then_refit_trainval" if refit_trainval else "train_only",
+    }
+    if refit_trainval:
+        extra_payload["refit_val_in_sample"] = refit_val_metrics
+    return _save_result(output_dir, selection_val_metrics, test_metrics, _ml_parameter_count(model), extra_payload=extra_payload)
 
 
 def _evaluate_torch_model(
@@ -632,6 +678,8 @@ def run_torch_baseline(
 
     if best_state is not None:
         model.load_state_dict(best_state)
+    selection_val_metrics = _evaluate_torch_model(model, val_loader, device, num_classes)
+    final_class_weights = class_weights
     if refit_trainval:
         selected_epochs = max(1, int(best_epoch or len(val_history) or epochs))
         print(f"{model_key}: 用 train+val 重新训练最终模型 {selected_epochs} 轮。", flush=True)
@@ -640,6 +688,17 @@ def run_torch_baseline(
         trainval_loader = DataLoader(trainval_ds, batch_size=batch_size, shuffle=True)
         model = _build_torch_model(model_key, train_ds, num_classes, hidden_dim, d_model, num_layers, dropout).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        trainval_labels = torch.cat([train_ds.labels, val_ds.labels], dim=0)
+        final_class_weights = _torch_class_weights(trainval_labels, num_classes, device, class_weighting)
+        criterion = nn.CrossEntropyLoss(weight=final_class_weights)
+        if final_class_weights is None:
+            print(f"{model_key}: Refit 类别加权 CE disabled", flush=True)
+        else:
+            print(
+                f"{model_key}: Refit 类别加权 CE mode={class_weighting}, "
+                f"weights={final_class_weights.detach().cpu().tolist()}",
+                flush=True,
+            )
         for _ in range(selected_epochs):
             model.train()
             for x_op, x_eis, x_cond, labels in trainval_loader:
@@ -648,10 +707,21 @@ def run_torch_baseline(
                 loss = criterion(logits, labels.to(device))
                 loss.backward()
                 optimizer.step()
-    val_metrics = _evaluate_torch_model(model, val_loader, device, num_classes)
+    refit_val_metrics = _evaluate_torch_model(model, val_loader, device, num_classes)
     test_metrics = _evaluate_torch_model(model, test_loader, device, num_classes)
     param_count = int(sum(parameter.numel() for parameter in model.parameters()))
-    metrics_path = _save_result(output_dir, val_metrics, test_metrics, param_count)
+    extra_payload = {
+        "selection_val": selection_val_metrics,
+        "refit_trainval": bool(refit_trainval),
+        "model_selection_rule": "best_val_epoch_then_refit_trainval" if refit_trainval else "best_val_checkpoint",
+        "class_weighting": class_weighting,
+        "class_weights": final_class_weights.detach().cpu().tolist() if final_class_weights is not None else None,
+        "selection_class_weights": class_weights.detach().cpu().tolist() if class_weights is not None else None,
+        "final_class_weights_source": "train_val" if refit_trainval else "train",
+    }
+    if refit_trainval:
+        extra_payload["refit_val_in_sample"] = refit_val_metrics
+    metrics_path = _save_result(output_dir, selection_val_metrics, test_metrics, param_count, extra_payload=extra_payload)
     torch.save({"model_state_dict": model.state_dict(), "model_key": model_key}, output_dir / "best.ckpt")
     return metrics_path
 
@@ -659,6 +729,7 @@ def run_torch_baseline(
 def run_proposed_model(
     npz_path: Path,
     output_dir: Path,
+    config_path: Path,
     epochs: int,
     patience: int,
     min_delta: float,
@@ -667,11 +738,16 @@ def run_proposed_model(
     min_epochs_before_stop: int,
     val_metric_smoothing: int,
     class_weighting: str,
+    seed: int,
+    lr: float,
+    weight_decay: float,
+    checkpoint_selection: str,
 ) -> Path:
-    config = load_config(ROOT / "configs/rbf_kanfusion.yaml")
+    config = load_config(config_path)
     experiment = config.setdefault("experiment", {})
     experiment["output_dir"] = str(output_dir)
     experiment["batch_size"] = int(batch_size)
+    experiment["seeds"] = [int(seed)]
     run_training(
         config=config,
         data_path=npz_path,
@@ -684,13 +760,16 @@ def run_proposed_model(
         min_epochs_before_stop_override=min_epochs_before_stop,
         val_metric_smoothing_override=val_metric_smoothing,
         class_weighting_override=class_weighting,
+        lr_override=lr,
+        weight_decay_override=weight_decay,
+        checkpoint_selection_override=checkpoint_selection,
     )
     return output_dir / "metrics.json"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="运行提出模型与传统机器学习/深度学习/Transformer/iTransformer 基准对比实验")
-    parser.add_argument("--excel", default="data/processed/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
     parser.add_argument("--ratios", nargs="+", default=list(RATIO_TO_TEST_SIZE.keys()), choices=list(RATIO_TO_TEST_SIZE.keys()))
     parser.add_argument("--models", nargs="+", default=list(MODEL_CATEGORIES.keys()), choices=list(MODEL_CATEGORIES.keys()))
     parser.add_argument("--output-root", default="results/official_baseline_comparison")
@@ -699,11 +778,11 @@ def main() -> None:
     parser.add_argument("--fixed-test-ratio", choices=list(RATIO_TO_TEST_SIZE.keys()), default="8_2", help="fixed_test 协议使用的固定验证/测试集基准比例")
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--stride-train", type=int, default=16)
-    parser.add_argument("--stride-eval", type=int, default=64)
+    parser.add_argument("--stride-eval", type=int, default=32)
     parser.add_argument("--eis-seq-len", type=int, default=128)
     parser.add_argument("--split-mode", default="segment")
     parser.add_argument("--segment-gap-seconds", type=float, default=600.0)
-    parser.add_argument("--segment-block-seconds", type=float, default=240.0)
+    parser.add_argument("--segment-block-seconds", type=float, default=300.0)
     parser.add_argument("--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--group-split-strategy", choices=["holdout_first", "three_way", "two_stage"], default="holdout_first", help="分组划分策略；holdout_first 先划分训练集与 held-out，再从 held-out 中分出验证/测试")
     parser.add_argument("--val-size", type=float, default=0.25)
@@ -726,7 +805,12 @@ def main() -> None:
     parser.add_argument("--min-train-stride", type=int, default=None, help="类别感知训练步长下限；默认 stride_train//2")
     parser.add_argument("--max-train-stride", type=int, default=None, help="类别感知训练步长上限；默认 stride_train*2")
     parser.add_argument("--class-stride-power", type=float, default=1.0, help="类别样本数到训练步长的缩放幂指数")
-    parser.add_argument("--class-weighting", choices=["sqrt_balanced", "balanced", "inverse_frequency", "effective_number", "none"], default="sqrt_balanced", help="神经网络模型 CE 类别权重模式")
+    parser.add_argument("--class-weighting", choices=["sqrt_balanced", "balanced", "inverse_frequency", "effective_number", "balanced_softmax", "logit_adjusted", "none"], default="sqrt_balanced", help="神经网络模型 CE 类别权重/调整模式")
+    parser.add_argument("--proposed-config", default="configs/rbf_kanfusion.yaml", help="提出模型使用的 YAML 配置路径，默认保持原 RBF/KANFusion 配置")
+    parser.add_argument("--checkpoint-selection", choices=["best_val", "best-val", "last"], default="best_val", help="proposed 最终 checkpoint 选择策略")
+    parser.add_argument("--split-retries", type=int, default=50, help="重试分组划分并选择少数类支持更好的 split")
+    parser.add_argument("--min-eval-class-windows", type=int, default=5, help="验证/测试集中任一类别窗口数低于该值时标记为不稳定")
+    parser.add_argument("--min-eval-class-groups", type=int, default=1, help="验证/测试集中任一类别 group 数低于该值时标记为不稳定")
     args = parser.parse_args()
 
     output_root = ROOT / args.output_root
@@ -761,6 +845,9 @@ def main() -> None:
             max_train_stride=args.max_train_stride,
             class_stride_power=args.class_stride_power,
             group_split_strategy=args.group_split_strategy,
+            split_retries=args.split_retries,
+            min_eval_class_windows=args.min_eval_class_windows,
+            min_eval_class_groups=args.min_eval_class_groups,
         )
     for ratio in args.ratios:
         npz_path = data_root / f"official_self_stack_impedance_eis_w{args.window_size}_{ratio}.npz"
@@ -797,6 +884,9 @@ def main() -> None:
                 max_train_stride=args.max_train_stride,
                 class_stride_power=args.class_stride_power,
                 group_split_strategy=args.group_split_strategy,
+                split_retries=args.split_retries,
+                min_eval_class_windows=args.min_eval_class_windows,
+                min_eval_class_groups=args.min_eval_class_groups,
             )
         for model_key in args.models:
             run_dir = output_root / ratio / model_key
@@ -805,6 +895,7 @@ def main() -> None:
                 metrics_path = run_proposed_model(
                     npz_path,
                     run_dir,
+                    ROOT / args.proposed_config,
                     args.epochs,
                     args.patience,
                     args.min_delta,
@@ -813,6 +904,10 @@ def main() -> None:
                     args.min_epochs_before_stop,
                     args.val_metric_smoothing,
                     args.class_weighting,
+                    args.seed,
+                    args.lr,
+                    args.weight_decay,
+                    args.checkpoint_selection,
                 )
             elif model_key in ml_models:
                 metrics_path = run_ml_baseline(model_key, npz_path, run_dir, args.seed, args.rf_estimators, args.refit_trainval)

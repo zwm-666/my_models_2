@@ -40,35 +40,45 @@ class ResidualKANFusion(nn.Module):
             nn.Linear(hidden, int(d_model)),
             nn.LayerNorm(int(d_model)),
         )
-        self.bottleneck = nn.Sequential(
-            nn.Linear(int(input_dim), int(bottleneck_dim)),
-            nn.LayerNorm(int(bottleneck_dim)),
-            nn.Tanh(),
-        )
-        self.kan = SimpleKANLayer(
-            input_dim=int(bottleneck_dim),
-            output_dim=int(bottleneck_dim),
-            num_basis=int(num_basis),
-            dropout=float(dropout),
-        )
-        self.kan_to_model = nn.Linear(int(bottleneck_dim), int(d_model))
-        if learnable_lambda:
+        if self.use_residual_kan:
+            self.bottleneck: nn.Module | None = nn.Sequential(
+                nn.Linear(int(input_dim), int(bottleneck_dim)),
+                nn.LayerNorm(int(bottleneck_dim)),
+                nn.Tanh(),
+            )
+            self.kan: SimpleKANLayer | None = SimpleKANLayer(
+                input_dim=int(bottleneck_dim),
+                output_dim=int(bottleneck_dim),
+                num_basis=int(num_basis),
+                dropout=float(dropout),
+            )
+            self.kan_to_model: nn.Linear | None = nn.Linear(int(bottleneck_dim), int(d_model))
+        else:
+            self.bottleneck = None
+            self.kan = None
+            self.kan_to_model = None
+        if self.use_residual_kan and learnable_lambda:
             self.lambda_kan = nn.Parameter(torch.tensor(float(lambda_kan)))
         else:
-            self.register_buffer("lambda_kan", torch.tensor(float(lambda_kan)))
+            self.register_buffer("lambda_kan", torch.tensor(float(lambda_kan) if self.use_residual_kan else 0.0))
 
     def forward(self, fusion_input: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         z_main = self.main(fusion_input)
-        z_bottleneck = self.bottleneck(fusion_input)
-        z_kan = self.kan_to_model(self.kan(z_bottleneck))
         if self.use_residual_kan:
+            if self.bottleneck is None or self.kan is None or self.kan_to_model is None:
+                raise RuntimeError("Residual KAN branch is enabled but KAN modules were not initialized")
+            z_bottleneck = self.bottleneck(fusion_input)
+            z_kan = self.kan_to_model(self.kan(z_bottleneck))
             h = z_main + self.lambda_kan * z_kan
+            kan_regularization = self.kan.regularization()
         else:
+            z_kan = torch.zeros_like(z_main)
             h = z_main
+            kan_regularization = fusion_input.new_zeros(())
         aux = {
             "z_main": z_main,
             "z_kan": z_kan,
             "lambda_kan": self.lambda_kan.reshape(()),
-            "kan_regularization": self.kan.regularization(),
+            "kan_regularization": kan_regularization,
         }
         return h, aux

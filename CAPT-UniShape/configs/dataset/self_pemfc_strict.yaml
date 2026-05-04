@@ -2,7 +2,7 @@
 # Dataset configuration -- Self-measured PEMFC data (strict session-family split)
 # ===========================================================================
 
-self_excel_path: "data/processed/测试数据.xlsx"
+self_excel_path: "data/raw/测试数据.xlsx"
 self_sheet_name: "Sheet1"
 data_format: "self"
 

@@ -8,7 +8,7 @@
 # Split strategy: group-stratified by 测试时间 (no data leakage)
 
 # --- Data source ---
-self_excel_path: "data/processed/测试数据.xlsx"
+self_excel_path: "data/raw/测试数据.xlsx"
 self_sheet_name: "Sheet1"
 data_format: "self"
 

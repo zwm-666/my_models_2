@@ -133,7 +133,7 @@ def _metric_row(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="运行单一训练/测试比例下的噪声鲁棒性实验")
-    parser.add_argument("--excel", default="data/processed/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
     parser.add_argument("--ratio", default="8_2", choices=list(RATIO_TO_TEST_SIZE.keys()))
     parser.add_argument("--models", nargs="+", default=list(MODELS.keys()), choices=list(MODELS.keys()))
     parser.add_argument("--noise-stds", nargs="+", type=float, default=[0.0, 0.01, 0.03, 0.05, 0.10])
@@ -142,11 +142,11 @@ def main() -> None:
     parser.add_argument("--data-root", default="data/processed/official_noise_experiments")
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--stride-train", type=int, default=16)
-    parser.add_argument("--stride-eval", type=int, default=64)
+    parser.add_argument("--stride-eval", type=int, default=32)
     parser.add_argument("--eis-seq-len", type=int, default=128)
     parser.add_argument("--split-mode", default="segment")
     parser.add_argument("--segment-gap-seconds", type=float, default=600.0)
-    parser.add_argument("--segment-block-seconds", type=float, default=240.0)
+    parser.add_argument("--segment-block-seconds", type=float, default=300.0)
     parser.add_argument("--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--group-split-strategy", choices=["holdout_first", "three_way", "two_stage"], default="holdout_first", help="分组划分策略；holdout_first 先划分训练集与 held-out，再从 held-out 中分出验证/测试")
     parser.add_argument("--val-size", type=float, default=0.25)
@@ -161,6 +161,9 @@ def main() -> None:
     parser.add_argument("--min-train-stride", type=int, default=None, help="类别感知训练步长下限；默认 stride_train//2")
     parser.add_argument("--max-train-stride", type=int, default=None, help="类别感知训练步长上限；默认 stride_train*2")
     parser.add_argument("--class-stride-power", type=float, default=1.0, help="类别样本数到训练步长的缩放幂指数")
+    parser.add_argument("--split-retries", type=int, default=50, help="重试分组划分并选择少数类支持更好的 split")
+    parser.add_argument("--min-eval-class-windows", type=int, default=5, help="验证/测试集中任一类别窗口数低于该值时标记为不稳定")
+    parser.add_argument("--min-eval-class-groups", type=int, default=1, help="验证/测试集中任一类别 group 数低于该值时标记为不稳定")
     args = parser.parse_args()
 
     output_root = ROOT / args.output_root
@@ -190,6 +193,9 @@ def main() -> None:
         max_train_stride=args.max_train_stride,
         class_stride_power=args.class_stride_power,
         group_split_strategy=args.group_split_strategy,
+        split_retries=args.split_retries,
+        min_eval_class_windows=args.min_eval_class_windows,
+        min_eval_class_groups=args.min_eval_class_groups,
     )
 
     rows: list[dict[str, Any]] = []

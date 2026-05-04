@@ -281,16 +281,16 @@ def build_self_datasets(
     stride_train: int = 8,
     stride_eval: int = 16,
     test_size: float = 0.20,
-    val_size: float = 0.15,
+    val_size: float = 0.25,
     random_state: int = 42,
     augment_train: bool = True,
     label_names: Optional[List[str]] = None,
-    split_mode: str = "timestamp",
+    split_mode: str = "segment",
     segment_gap_seconds: float = 600.0,
-    segment_block_seconds: float = 600.0,
+    segment_block_seconds: float = 300.0,
     segment_label_boundary: bool = True,
     feature_subset: str = "full",
-    group_split_strategy: str = "two_stage",
+    group_split_strategy: str = "holdout_first",
 ) -> Tuple[CSVFuelCellDataset, CSVFuelCellDataset, CSVFuelCellDataset, Dict[str, Any]]:
     """Load self-measured Excel → group split → window → datasets.
 

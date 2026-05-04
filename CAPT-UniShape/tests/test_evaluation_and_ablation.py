@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+import numpy as np
+import torch
+
+
+class EvaluationSplitTests(unittest.TestCase):
+    def test_split_indices_from_npz_selects_only_requested_split(self) -> None:
+        from evaluate import split_indices_from_npz
+
+        data = {"split": np.array([0, 1, 2, 2, 1], dtype=np.int64)}
+
+        self.assertEqual(split_indices_from_npz(data, "test").tolist(), [2, 3])
+        self.assertEqual(split_indices_from_npz(data, "val").tolist(), [1, 4])
+        self.assertEqual(split_indices_from_npz(data, "all").tolist(), [0, 1, 2, 3, 4])
+
+    def test_split_indices_from_npz_rejects_missing_split_for_named_split(self) -> None:
+        from evaluate import split_indices_from_npz
+
+        with self.assertRaises(ValueError):
+            split_indices_from_npz({}, "test")
+
+    def test_evaluation_artifact_semantics_use_requested_split_name(self) -> None:
+        from evaluate import evaluation_artifact_semantics
+
+        semantics = evaluation_artifact_semantics("test")
+
+        self.assertEqual(semantics["evaluated_split"], "test")
+        self.assertEqual(semantics["top_level_metrics"], "test")
+
+
+class ResidualKANFusionTests(unittest.TestCase):
+    def test_disabled_kan_fusion_returns_zero_kan_regularization(self) -> None:
+        from models.modules.residual_kan_fusion import ResidualKANFusion
+
+        torch.manual_seed(7)
+        module = ResidualKANFusion(
+            input_dim=6,
+            d_model=4,
+            hidden_dim=8,
+            bottleneck_dim=3,
+            num_basis=4,
+            use_residual_kan=False,
+        )
+        output, aux = module(torch.randn(5, 6))
+
+        self.assertEqual(tuple(output.shape), (5, 4))
+        self.assertAlmostEqual(float(aux["kan_regularization"].detach().cpu()), 0.0, places=7)
+
+    def test_disabled_kan_fusion_excludes_unused_kan_parameters(self) -> None:
+        from models.modules.residual_kan_fusion import ResidualKANFusion
+
+        enabled = ResidualKANFusion(input_dim=6, d_model=4, hidden_dim=8, bottleneck_dim=3, num_basis=4, use_residual_kan=True)
+        disabled = ResidualKANFusion(input_dim=6, d_model=4, hidden_dim=8, bottleneck_dim=3, num_basis=4, use_residual_kan=False)
+
+        enabled_params = sum(parameter.numel() for parameter in enabled.parameters())
+        disabled_params = sum(parameter.numel() for parameter in disabled.parameters())
+
+        self.assertLess(disabled_params, enabled_params)
+
+
+class TrainingUtilityTests(unittest.TestCase):
+    def test_snapshot_state_dict_clones_parameter_values(self) -> None:
+        from train import snapshot_state_dict
+
+        layer = torch.nn.Linear(2, 1, bias=False)
+        snapshot = snapshot_state_dict(layer)
+        original_value = snapshot["weight"].clone()
+
+        with torch.no_grad():
+            layer.weight.add_(10.0)
+
+        self.assertTrue(torch.equal(snapshot["weight"], original_value))
+        self.assertFalse(torch.equal(snapshot["weight"], layer.state_dict()["weight"].cpu()))
+
+    def test_class_logit_adjustment_uses_training_class_counts(self) -> None:
+        from train import compute_class_logit_adjustment
+
+        counts = torch.tensor([2.0, 6.0, 12.0])
+        adjustment = compute_class_logit_adjustment(counts, tau=1.0)
+
+        expected = torch.log(counts / counts.sum())
+        self.assertTrue(torch.allclose(adjustment.cpu(), expected))
+
+    def test_apply_experiment_overrides_updates_lr_and_weight_decay(self) -> None:
+        from train import apply_experiment_overrides
+
+        experiment = {"lr": 1e-4, "weight_decay": 1e-4, "batch_size": 16}
+        updated = apply_experiment_overrides(experiment, lr=3e-4, weight_decay=5e-5)
+
+        self.assertEqual(updated["batch_size"], 16)
+        self.assertAlmostEqual(updated["lr"], 3e-4)
+        self.assertAlmostEqual(updated["weight_decay"], 5e-5)
+        self.assertAlmostEqual(experiment["lr"], 1e-4)
+
+    def test_attach_effective_experiment_settings_updates_saved_config(self) -> None:
+        from train import attach_effective_experiment_settings
+
+        config = {"experiment": {"lr": 1e-4}}
+        experiment = {"lr": 3e-4, "weight_decay": 5e-5}
+
+        updated = attach_effective_experiment_settings(config, experiment)
+
+        self.assertIs(updated, config)
+        self.assertAlmostEqual(updated["experiment"]["lr"], 3e-4)
+        self.assertAlmostEqual(updated["experiment"]["weight_decay"], 5e-5)
+
+    def test_normalize_checkpoint_selection_accepts_last_strategy(self) -> None:
+        from train import normalize_checkpoint_selection
+
+        self.assertEqual(normalize_checkpoint_selection("last"), "last")
+        self.assertEqual(normalize_checkpoint_selection("best-val"), "best_val")
+
+    def test_checkpoint_alias_names_include_selected_and_strategy_specific_name(self) -> None:
+        from train import checkpoint_alias_names
+
+        self.assertEqual(checkpoint_alias_names("best_val"), ["best.ckpt", "selected.ckpt"])
+        self.assertEqual(checkpoint_alias_names("last"), ["best.ckpt", "selected.ckpt", "last.ckpt"])
+
+
+class ProposedAccuracySearchTests(unittest.TestCase):
+    def test_metric_record_prefers_authoritative_test_metrics(self) -> None:
+        from scripts.run_proposed_accuracy_search import metric_record_from_payload
+
+        record = metric_record_from_payload(
+            Path("results/example/metrics.json"),
+            {
+                "accuracy": 0.50,
+                "macro_f1": 0.40,
+                "test": {"accuracy": 0.97, "macro_f1": 0.96},
+                "split_diagnostics": {"test_size": 12},
+            },
+            source="candidate",
+        )
+
+        self.assertAlmostEqual(record["test_accuracy"], 0.97)
+        self.assertAlmostEqual(record["test_macro_f1"], 0.96)
+        self.assertEqual(record["metric_source"], "test")
+        self.assertEqual(record["split_diagnostics"]["test_size"], 12)
+
+    def test_first_successful_record_uses_validation_metric_by_default(self) -> None:
+        from scripts.run_proposed_accuracy_search import first_successful_record
+
+        records = [
+            {"test_accuracy": 0.99, "val_macro_f1": 0.80, "metrics_path": "a"},
+            {"test_accuracy": 0.90, "val_macro_f1": 0.95, "metrics_path": "b"},
+            {"test_accuracy": 0.99, "val_macro_f1": 0.99, "metrics_path": "c"},
+        ]
+
+        selected = first_successful_record(records, threshold=0.95)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["metrics_path"], "b")
+
+    def test_search_args_default_stop_metric_is_validation_not_test(self) -> None:
+        from scripts.run_proposed_accuracy_search import parse_args
+
+        args = parse_args(["--dry-run"])
+
+        self.assertEqual(args.search_metric, "val_macro_f1")
+
+    def test_search_command_forwards_checkpoint_selection(self) -> None:
+        from scripts.run_proposed_accuracy_search import attempt_command, build_attempts, parse_args
+
+        args = parse_args(["--checkpoint-selection", "last", "--max-attempts", "1", "--dry-run"])
+        attempt = build_attempts(args)[0]
+        command = attempt_command(args, attempt)
+
+        self.assertIn("--checkpoint-selection", command)
+        self.assertIn("last", command)
+
+
+class MultiSeedExperimentCLITests(unittest.TestCase):
+    def test_multiseed_cli_accepts_logit_adjusted_class_weighting(self) -> None:
+        from scripts.run_official_multiseed_experiments import parse_args
+
+        args = parse_args(["--class-weighting", "logit_adjusted", "--skip-run"])
+
+        self.assertEqual(args.class_weighting, "logit_adjusted")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,6 +1,6 @@
 """Convert self-measured Excel data to the NPZ format used by official models.
 
-The source Excel (`data/processed/测试数据.xlsx`) contains 216 single-cell
+The source Excel (`data/raw/测试数据.xlsx`) contains 216 single-cell
 voltages, nine impedance/EIS statistical features, three stack-level variables,
 timestamps and labels.  This converter reuses the existing group-stratified
 Excel loader to avoid leakage, then builds the three official model inputs:
@@ -82,6 +82,135 @@ def _label_count_dict(values: np.ndarray[Any, Any]) -> dict[str, int]:
     return {str(int(label)): int(count) for label, count in zip(unique, counts)}
 
 
+def _count_group_windows(row_count: int, window_size: int, stride: int) -> int:
+    if row_count < window_size:
+        return 1
+    return len(range(0, row_count - window_size + 1, max(1, int(stride))))
+
+
+def _split_window_counts(
+    row_counts: dict[object, int],
+    group_label_map: Any,
+    split_groups: np.ndarray[Any, Any],
+    window_size: int,
+    stride: int,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for group in split_groups:
+        label = str(int(group_label_map[group]))
+        counts[label] = counts.get(label, 0) + _count_group_windows(row_counts[group], window_size, stride)
+    return counts
+
+
+def _min_count(counts: dict[str, int], labels: list[str]) -> int:
+    if not labels:
+        return 0
+    return min(int(counts.get(label, 0)) for label in labels)
+
+
+def _split_quality(
+    row_counts: dict[object, int],
+    group_label_map: Any,
+    g_tr: np.ndarray[Any, Any],
+    g_va: np.ndarray[Any, Any],
+    g_te: np.ndarray[Any, Any],
+    window_size: int,
+    stride_train: int,
+    stride_eval: int,
+    labels: list[str],
+    min_eval_class_windows: int,
+    min_eval_class_groups: int,
+) -> dict[str, object]:
+    train_window_counts = _split_window_counts(row_counts, group_label_map, g_tr, window_size, stride_train)
+    val_window_counts = _split_window_counts(row_counts, group_label_map, g_va, window_size, stride_eval)
+    test_window_counts = _split_window_counts(row_counts, group_label_map, g_te, window_size, stride_eval)
+    train_group_counts = _label_count_dict(np.array([group_label_map[g] for g in g_tr]))
+    val_group_counts = _label_count_dict(np.array([group_label_map[g] for g in g_va]))
+    test_group_counts = _label_count_dict(np.array([group_label_map[g] for g in g_te]))
+    min_val_windows = _min_count(val_window_counts, labels)
+    min_test_windows = _min_count(test_window_counts, labels)
+    min_val_groups = _min_count(val_group_counts, labels)
+    min_test_groups = _min_count(test_group_counts, labels)
+    passed = (
+        min_val_windows >= int(min_eval_class_windows)
+        and min_test_windows >= int(min_eval_class_windows)
+        and min_val_groups >= int(min_eval_class_groups)
+        and min_test_groups >= int(min_eval_class_groups)
+    )
+    score = min(min_val_windows, min_test_windows) * 1000 + min(min_val_groups, min_test_groups) * 100 + min(len(g_va), len(g_te))
+    return {
+        "passed": passed,
+        "score": int(score),
+        "train_window_counts": train_window_counts,
+        "val_window_counts": val_window_counts,
+        "test_window_counts": test_window_counts,
+        "train_group_counts": train_group_counts,
+        "val_group_counts": val_group_counts,
+        "test_group_counts": test_group_counts,
+        "min_val_class_windows": int(min_val_windows),
+        "min_test_class_windows": int(min_test_windows),
+        "min_val_class_groups": int(min_val_groups),
+        "min_test_class_groups": int(min_test_groups),
+    }
+
+
+def _choose_group_split(
+    groups: np.ndarray[Any, Any],
+    group_labels: np.ndarray[Any, Any],
+    row_counts: dict[object, int],
+    group_label_map: Any,
+    test_size: float,
+    val_size: float,
+    random_state: int,
+    group_split_strategy: str,
+    window_size: int,
+    stride_train: int,
+    stride_eval: int,
+    split_retries: int,
+    min_eval_class_windows: int,
+    min_eval_class_groups: int,
+) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], dict[str, object]]:
+    labels = [str(int(label)) for label in sorted(np.unique(group_labels).tolist())]
+    best: tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], dict[str, object]] | None = None
+    attempts = max(1, int(split_retries))
+    for attempt in range(attempts):
+        seed = int(random_state) + attempt
+        try:
+            g_tr, g_va, g_te = _group_split(groups, group_labels, test_size, val_size, seed, strategy=group_split_strategy)
+        except ValueError:
+            if attempt == attempts - 1 and best is None:
+                raise
+            continue
+        quality = _split_quality(
+            row_counts=row_counts,
+            group_label_map=group_label_map,
+            g_tr=g_tr,
+            g_va=g_va,
+            g_te=g_te,
+            window_size=window_size,
+            stride_train=stride_train,
+            stride_eval=stride_eval,
+            labels=labels,
+            min_eval_class_windows=min_eval_class_windows,
+            min_eval_class_groups=min_eval_class_groups,
+        )
+        quality["chosen_seed"] = seed
+        quality["attempt_index"] = attempt
+        quality["attempts_requested"] = attempts
+        raw_quality_score = quality.get("score", 0)
+        quality_score = raw_quality_score if isinstance(raw_quality_score, int) else 0
+        raw_best_score = best[3].get("score", 0) if best is not None else -1
+        best_score = raw_best_score if isinstance(raw_best_score, int) else -1
+        if best is None or quality_score > best_score:
+            best = (g_tr, g_va, g_te, quality)
+        if bool(quality["passed"]):
+            return g_tr, g_va, g_te, quality
+    if best is None:
+        raise ValueError("Unable to create a non-empty group split")
+    best[3]["passed"] = False
+    return best
+
+
 def _class_aware_stride_map(
     labels: np.ndarray[Any, Any],
     base_stride: int,
@@ -123,6 +252,9 @@ def _build_stack_windows(
     max_train_stride: int,
     class_stride_power: float,
     group_split_strategy: str,
+    split_retries: int,
+    min_eval_class_windows: int,
+    min_eval_class_groups: int,
 ) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], dict[str, object]]:
     df = pd.read_excel(Path(excel_path), sheet_name=sheet_name, engine="openpyxl")
     expected = set(STACK_COLS + COND_COLS + [TIME_COL, LABEL_COL])
@@ -142,7 +274,23 @@ def _build_stack_windows(
     groups = np.asarray(df["__group_key__"].unique())
     group_label_map = df.groupby("__group_key__")[LABEL_COL].first()
     group_labels = np.array([group_label_map[g] for g in groups])
-    g_tr, g_va, g_te = _group_split(groups, group_labels, test_size, val_size, random_state, strategy=group_split_strategy)
+    row_counts: dict[object, int] = {group: int(count) for group, count in df.groupby("__group_key__").size().items()}
+    g_tr, g_va, g_te, split_quality = _choose_group_split(
+        groups=groups,
+        group_labels=group_labels,
+        row_counts=row_counts,
+        group_label_map=group_label_map,
+        test_size=test_size,
+        val_size=val_size,
+        random_state=random_state,
+        group_split_strategy=group_split_strategy,
+        window_size=window_size,
+        stride_train=stride_train,
+        stride_eval=stride_eval,
+        split_retries=split_retries,
+        min_eval_class_windows=min_eval_class_windows,
+        min_eval_class_groups=min_eval_class_groups,
+    )
     g_tr_set = set(g_tr.tolist())
     g_va_set = set(g_va.tolist())
     g_te_set = set(g_te.tolist())
@@ -230,6 +378,7 @@ def _build_stack_windows(
         "test_size_ratio": test_size,
         "val_size_ratio_within_train_pool": val_size,
         "group_split_strategy": group_split_strategy,
+        "split_quality": split_quality,
     }
     return x_op, x_cond, labels, split, meta
 
@@ -242,20 +391,23 @@ def build_npz(
     stride_train: int = 64,
     stride_eval: int = 128,
     eis_seq_len: int = 128,
-    split_mode: str = "session10m",
+    split_mode: str = "segment",
     segment_gap_seconds: float = 600.0,
-    segment_block_seconds: float = 600.0,
+    segment_block_seconds: float = 300.0,
     segment_label_boundary: bool = True,
     feature_subset: str = "full",
     random_state: int = 42,
     op_source: str = "stack",
     test_size: float = 0.20,
-    val_size: float = 0.15,
+    val_size: float = 0.25,
     class_aware_train_stride: bool = False,
     min_train_stride: int | None = None,
     max_train_stride: int | None = None,
     class_stride_power: float = 1.0,
     group_split_strategy: str = "holdout_first",
+    split_retries: int = 50,
+    min_eval_class_windows: int = 5,
+    min_eval_class_groups: int = 1,
 ) -> dict[str, object]:
     resolved_min_train_stride = int(min_train_stride if min_train_stride is not None else max(1, stride_train // 2))
     resolved_max_train_stride = int(max_train_stride if max_train_stride is not None else max(stride_train, stride_train * 2))
@@ -282,6 +434,9 @@ def build_npz(
             max_train_stride=resolved_max_train_stride,
             class_stride_power=class_stride_power,
             group_split_strategy=group_split_strategy,
+            split_retries=split_retries,
+            min_eval_class_windows=min_eval_class_windows,
+            min_eval_class_groups=min_eval_class_groups,
         )
     elif op_source == "cells":
         if class_aware_train_stride:
@@ -352,6 +507,9 @@ def build_npz(
         "max_train_stride": resolved_max_train_stride,
         "class_stride_power": class_stride_power,
         "group_split_strategy": group_split_strategy,
+        "split_retries": int(split_retries),
+        "min_eval_class_windows": int(min_eval_class_windows),
+        "min_eval_class_groups": int(min_eval_class_groups),
         "feature_subset": feature_subset,
         "op_source": op_source,
         "source_meta": {
@@ -366,8 +524,20 @@ def build_npz(
             "test_size_ratio": test_size,
             "val_size_ratio_within_train_pool": val_size,
             "group_split_strategy": meta.get("group_split_strategy", group_split_strategy),
+            "split_quality": meta.get("split_quality"),
         },
     }
+    split_quality = meta.get("split_quality")
+    if isinstance(split_quality, dict):
+        summary["split_quality"] = split_quality
+        if not bool(split_quality.get("passed", False)):
+            print(
+                "警告: 当前 split 未达到少数类支持阈值 | "
+                f"min_val_windows={split_quality.get('min_val_class_windows')} | "
+                f"min_test_windows={split_quality.get('min_test_class_windows')} | "
+                f"chosen_seed={split_quality.get('chosen_seed')}",
+                flush=True,
+            )
     summary_path = output.with_suffix(".summary.json")
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return summary
@@ -375,7 +545,7 @@ def build_npz(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build official CAPT-UniShape NPZ from 测试数据.xlsx")
-    parser.add_argument("--excel", default="data/processed/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
     parser.add_argument("--output", default="data/processed/official_self_multisource.npz")
     parser.add_argument("--sheet-name", default="Sheet1")
     parser.add_argument("--window-size", type=int, default=256)
@@ -384,18 +554,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eis-seq-len", type=int, default=128)
     parser.add_argument("--split-mode", default="segment")
     parser.add_argument("--segment-gap-seconds", type=float, default=600.0)
-    parser.add_argument("--segment-block-seconds", type=float, default=600.0)
+    parser.add_argument("--segment-block-seconds", type=float, default=300.0)
     parser.add_argument("--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--feature-subset", default="full")
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--op-source", choices=["stack", "cells"], default="stack")
     parser.add_argument("--test-size", type=float, default=0.20, help="Held-out test fraction, e.g. 0.2 for 8:2")
-    parser.add_argument("--val-size", type=float, default=0.15, help="Validation fraction inside the non-test training pool for early stopping")
+    parser.add_argument("--val-size", type=float, default=0.25, help="Validation fraction inside the non-test training pool for early stopping")
     parser.add_argument("--class-aware-train-stride", action="store_true", help="Use smaller train strides for minority classes and larger strides for majority classes")
     parser.add_argument("--min-train-stride", type=int, default=None, help="Minimum class-aware training stride; default=stride_train//2")
     parser.add_argument("--max-train-stride", type=int, default=None, help="Maximum class-aware training stride; default=stride_train*2")
     parser.add_argument("--class-stride-power", type=float, default=1.0, help="Power for class-count-to-stride scaling")
     parser.add_argument("--group-split-strategy", choices=["holdout_first", "three_way", "two_stage"], default="holdout_first", help="Group-level split strategy; holdout_first makes val/test siblings from the same held-out pool")
+    parser.add_argument("--split-retries", type=int, default=50, help="Retry group splitting with different seeds and keep the best minority-support split")
+    parser.add_argument("--min-eval-class-windows", type=int, default=5, help="Warn if any validation/test class has fewer windows")
+    parser.add_argument("--min-eval-class-groups", type=int, default=1, help="Warn if any validation/test class has fewer groups")
     return parser.parse_args()
 
 
@@ -423,6 +596,9 @@ def main() -> None:
         max_train_stride=args.max_train_stride,
         class_stride_power=args.class_stride_power,
         group_split_strategy=args.group_split_strategy,
+        split_retries=args.split_retries,
+        min_eval_class_windows=args.min_eval_class_windows,
+        min_eval_class_groups=args.min_eval_class_groups,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 

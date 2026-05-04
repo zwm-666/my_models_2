@@ -6,31 +6,38 @@
 
 ## 1. 本地需要上传的文件
 
-本地已经打包好的文件是：
+本项目不长期保留生成好的 zip 包，避免把可再生成的压缩产物放在项目根目录。需要上传 Kaggle 时，在项目根目录重新生成：
+
+```powershell
+Compress-Archive -Path configs,data,external,models,scripts,src,docs,train.py,evaluate.py,README.md -DestinationPath CAPT-UniShape_kaggle_package.zip -Force
+```
+
+生成后的文件是：
 
 ```text
 CAPT-UniShape_kaggle_package.zip
 ```
 
-完整路径：
+生成位置：
 
 ```text
 D:\learn\论文所需材料\论文2\CAPT-UniShape\CAPT-UniShape_kaggle_package.zip
 ```
 
-这个 zip 包已经包含：
+这个 zip 包应包含：
 
 ```text
 configs/
-data/processed/测试数据.xlsx
+data/raw/测试数据.xlsx
 external/unishape/
 models/
 scripts/
 src/
 train.py
 evaluate.py
-README_训练测试绘图.md
-KAGGLE_运行说明.md
+README.md
+docs/README_训练测试绘图.md
+docs/KAGGLE_运行说明.md
 ```
 
 ---
@@ -215,7 +222,7 @@ results/official_baseline_comparison/test_summary.csv
 运行：
 
 ```python
-!python scripts/build_official_npz_from_self_excel.py --excel "data/processed/测试数据.xlsx" --output "data/processed/official_self_stack_impedance_eis_w64_stable.npz" --window-size 64 --stride-train 16 --stride-eval 64 --eis-seq-len 128 --split-mode segment --segment-block-seconds 240 --op-source stack --test-size 0.2 --val-size 0.25
+!python scripts/build_official_npz_from_self_excel.py --excel "data/raw/测试数据.xlsx" --output "data/processed/official_self_stack_impedance_eis_w64_stable.npz" --window-size 64 --stride-train 16 --stride-eval 64 --eis-seq-len 128 --split-mode segment --segment-block-seconds 240 --op-source stack --test-size 0.2 --val-size 0.25
 ```
 
 主要输出：
@@ -334,7 +341,7 @@ CAPT-UniShape_kaggle_package.zip
 确认解压后存在：
 
 ```text
-data/processed/测试数据.xlsx
+data/raw/测试数据.xlsx
 ```
 
 可以运行：

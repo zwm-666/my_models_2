@@ -90,6 +90,7 @@ def _make_data_variant(base_npz: Path, output_npz: Path, zero_keys: list[str]) -
 def _metric_row(variant: str, description: str, metrics_path: Path) -> dict[str, Any]:
     payload = json.loads(metrics_path.read_text(encoding="utf-8"))
     test_payload = payload.get("test", payload)
+    class0 = test_payload.get("classification_report", {}).get("0", {})
     return {
         "variant": variant,
         "description": description,
@@ -99,6 +100,9 @@ def _metric_row(variant: str, description: str, metrics_path: Path) -> dict[str,
         "test_accuracy": float(test_payload.get("accuracy", 0.0)),
         "test_macro_f1": float(test_payload.get("macro_f1", 0.0)),
         "test_weighted_f1": float(test_payload.get("weighted_f1", 0.0)),
+        "class0_precision": float(class0.get("precision", 0.0)),
+        "class0_recall": float(class0.get("recall", 0.0)),
+        "class0_f1": float(class0.get("f1-score", 0.0)),
         "test_inference_ms": float(test_payload.get("inference_time_per_sample_ms", 0.0)),
         "parameter_count": int(payload.get("parameter_count", 0)),
         "metrics_path": str(metrics_path),
@@ -114,6 +118,12 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--min-delta", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--class-weighting", choices=["sqrt_balanced", "balanced", "inverse_frequency", "effective_number", "balanced_softmax", "logit_adjusted", "none"], default="sqrt_balanced")
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--checkpoint-selection", choices=["best_val", "best-val", "last"], default="best_val")
     parser.add_argument("--refit-trainval", action=argparse.BooleanOptionalAction, default=False, help="验证集只用于选epoch，最终模型用train+val重训；默认关闭以保持验证/测试独立")
     parser.add_argument("--min-epochs-before-stop", type=int, default=20)
     parser.add_argument("--val-metric-smoothing", type=int, default=3)
@@ -134,7 +144,9 @@ def main() -> None:
         for key, value in dict(spec.get("overrides", {})).items():
             config[key] = value
         run_dir = output_root / variant
-        config.setdefault("experiment", {})["output_dir"] = str(run_dir)
+        experiment = config.setdefault("experiment", {})
+        experiment["output_dir"] = str(run_dir)
+        experiment["seeds"] = [int(args.seed)]
         print(f"\n=== 消融实验: {variant} ===", flush=True)
         print(spec["description"], flush=True)
         run_training(
@@ -144,9 +156,14 @@ def main() -> None:
             epochs_override=args.epochs,
             patience_override=args.patience,
             min_delta_override=args.min_delta,
+            batch_size_override=args.batch_size,
             refit_trainval_override=args.refit_trainval,
             min_epochs_before_stop_override=args.min_epochs_before_stop,
             val_metric_smoothing_override=args.val_metric_smoothing,
+            class_weighting_override=args.class_weighting,
+            lr_override=args.lr,
+            weight_decay_override=args.weight_decay,
+            checkpoint_selection_override=args.checkpoint_selection,
         )
         rows.append(_metric_row(variant, str(spec["description"]), run_dir / "metrics.json"))
 

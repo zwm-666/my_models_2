@@ -108,7 +108,7 @@ def build_datasets_from_npz(
     Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     FuelCellNPZDataset | None,
 ]:
-    """Build train/val(/test) datasets, respecting an optional NPZ split array."""
+    """Build train/val(/test) datasets from an explicit NPZ split array."""
     data = np.load(data_path)
     if "split" in data:
         split = np.asarray(data["split"], dtype=np.int64)
@@ -119,13 +119,42 @@ def build_datasets_from_npz(
             raise ValueError("NPZ split array must contain train=0 and val=1 samples")
         test_ds = FuelCellNPZDataset(data_path, test_idx) if len(test_idx) > 0 else None
         return FuelCellNPZDataset(data_path, train_idx), FuelCellNPZDataset(data_path, val_idx), test_ds
-    dataset = FuelCellNPZDataset(data_path)
-    train_subset, val_subset = split_dataset(dataset, val_ratio=val_ratio, seed=seed)
-    return train_subset, val_subset, None
+    raise ValueError(
+        "NPZ data must contain an explicit split array. Rebuild data with scripts/build_official_npz_from_self_excel.py "
+        "to avoid silent random splits and val/test protocol drift."
+    )
 
 
 def count_parameters(model: torch.nn.Module) -> int:
     return int(sum(parameter.numel() for parameter in model.parameters()))
+
+
+def snapshot_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Create an immutable CPU snapshot of a model state dict."""
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+
+def normalize_checkpoint_selection(value: str | None) -> str:
+    normalized = str(value or "best_val").lower().replace("-", "_")
+    aliases = {
+        "best": "best_val",
+        "best_val": "best_val",
+        "best_validation": "best_val",
+        "val": "best_val",
+        "last": "last",
+        "final": "last",
+    }
+    if normalized not in aliases:
+        raise ValueError(f"Unsupported checkpoint_selection: {value!r}. Use best_val or last.")
+    return aliases[normalized]
+
+
+def checkpoint_alias_names(checkpoint_selection: str) -> list[str]:
+    selection = normalize_checkpoint_selection(checkpoint_selection)
+    names = ["best.ckpt", "selected.ckpt"]
+    if selection == "last":
+        names.append("last.ckpt")
+    return names
 
 
 def set_reproducible_seed(seed: int) -> None:
@@ -170,6 +199,27 @@ def build_experiment_model(
     return model
 
 
+def apply_experiment_overrides(
+    experiment: dict[str, Any],
+    *,
+    lr: float | None = None,
+    weight_decay: float | None = None,
+) -> dict[str, Any]:
+    """Return copied experiment settings with optimizer overrides applied."""
+    updated = dict(experiment)
+    if lr is not None:
+        updated["lr"] = float(lr)
+    if weight_decay is not None:
+        updated["weight_decay"] = float(weight_decay)
+    return updated
+
+
+def attach_effective_experiment_settings(config: dict[str, Any], experiment: dict[str, Any]) -> dict[str, Any]:
+    """Record the effective experiment settings in the config saved with artifacts."""
+    config["experiment"] = dict(experiment)
+    return config
+
+
 def build_optimizer(model: torch.nn.Module, experiment: dict[str, Any]) -> torch.optim.Optimizer:
     return torch.optim.AdamW(
         model.parameters(),
@@ -193,6 +243,26 @@ def _dataset_label_counts(
     return {int(label): int(count) for label, count in zip(unique, counts)}
 
 
+def _dataset_class_count_tensor(
+    dataset: Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    num_classes: int,
+    device: torch.device,
+) -> torch.Tensor:
+    counts_map = _dataset_label_counts(dataset)
+    return torch.tensor(
+        [float(counts_map.get(class_id, 0)) for class_id in range(int(num_classes))],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def compute_class_logit_adjustment(class_counts: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
+    """Return tau-scaled log class priors for logit-adjusted CE."""
+    counts = class_counts.to(dtype=torch.float32)
+    priors = counts.clamp_min(1.0) / counts.clamp_min(0.0).sum().clamp_min(1.0)
+    return float(tau) * torch.log(priors.clamp_min(1e-12))
+
+
 def _compute_class_weights(
     dataset: Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     num_classes: int,
@@ -203,14 +273,11 @@ def _compute_class_weights(
     normalized_mode = str(mode).lower()
     if normalized_mode in {"", "none", "false", "off", "disabled"}:
         return None
+    if normalized_mode in {"balanced_softmax", "logit_adjusted"}:
+        return None
     if normalized_mode not in {"balanced", "inverse_frequency", "sqrt_balanced", "effective_number"}:
         raise ValueError(f"Unsupported class_weighting mode: {mode}")
-    counts_map = _dataset_label_counts(dataset)
-    counts = torch.tensor(
-        [float(counts_map.get(class_id, 0)) for class_id in range(int(num_classes))],
-        dtype=torch.float32,
-        device=device,
-    )
+    counts = _dataset_class_count_tensor(dataset, num_classes, device)
     present = counts > 0
     if not bool(present.any()):
         return None
@@ -316,6 +383,12 @@ def save_outputs(output_dir: Path, metrics: dict[str, Any], param_count: int) ->
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_to_save = dict(metrics)
     metrics_to_save["parameter_count"] = int(param_count)
+    metrics_to_save["artifact_semantics"] = {
+        "top_level_metrics": "selection_validation",
+        "non_prefixed_confusion_matrix_csv": "selection_validation_backward_compatibility",
+        "test_prefixed_files": "authoritative_test_artifacts_when_present",
+        "val_prefixed_files": "selection_validation_artifacts",
+    }
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as handle:
         json.dump(metrics_to_save, handle, indent=2, ensure_ascii=False)
     _write_confusion_matrix(output_dir / "val_confusion_matrix.csv", metrics)
@@ -365,6 +438,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     class_weights: torch.Tensor | None = None,
+    logit_adjustment: torch.Tensor | None = None,
 ) -> float:
     model.train()
     total = 0.0
@@ -377,6 +451,7 @@ def train_one_epoch(
             x_cond.to(device),
             labels.to(device),
             class_weights=class_weights,
+            logit_adjustment=logit_adjustment,
         )
         del logits
         loss = loss_dict["total_loss"]
@@ -404,8 +479,16 @@ def run_training(
     min_epochs_before_stop_override: int | None = None,
     val_metric_smoothing_override: int | None = None,
     class_weighting_override: str | None = None,
+    lr_override: float | None = None,
+    weight_decay_override: float | None = None,
+    checkpoint_selection_override: str | None = None,
 ) -> dict[str, Any]:
-    experiment = config.get("experiment", {})
+    experiment = apply_experiment_overrides(
+        config.get("experiment", {}),
+        lr=lr_override,
+        weight_decay=weight_decay_override,
+    )
+    config = attach_effective_experiment_settings(config, experiment)
     seed = int((experiment.get("seeds") or [42])[0])
     set_reproducible_seed(seed)
     print("=" * 72, flush=True)
@@ -415,6 +498,7 @@ def run_training(
     train_ds, val_ds, test_ds = build_datasets_from_npz(data_path, seed=seed, val_ratio=float(experiment.get("val_ratio", 0.2)))
     probe_dataset = train_ds if isinstance(train_ds, FuelCellNPZDataset) else FuelCellNPZDataset(data_path)
     config = sync_config_with_dataset(config, probe_dataset)
+    config = attach_effective_experiment_settings(config, experiment)
     batch_size = int(batch_size_override or experiment.get("batch_size", 8))
     train_loader = make_loader(train_ds, batch_size=batch_size, shuffle=True, seed=seed)
     val_loader = make_loader(val_ds, batch_size=batch_size, shuffle=False, seed=seed)
@@ -437,6 +521,9 @@ def run_training(
             else experiment.get("val_metric_smoothing", 1)
         ),
     )
+    checkpoint_selection = normalize_checkpoint_selection(
+        checkpoint_selection_override if checkpoint_selection_override is not None else experiment.get("checkpoint_selection", "best_val")
+    )
     print(f"设备: {device}", flush=True)
     if not isinstance(train_ds, _SizedDataset) or not isinstance(val_ds, _SizedDataset):
         raise TypeError("train_ds and val_ds must provide __len__")
@@ -444,11 +531,15 @@ def run_training(
     n_val = len(val_ds)
     n_test = len(test_ds) if test_ds is not None else 0
     print(f"训练/验证/测试样本数: {n_train} / {n_val} / {n_test}", flush=True)
-    print(f"类别分布 train: {_dataset_label_counts(train_ds)}", flush=True)
-    print(f"类别分布 val:   {_dataset_label_counts(val_ds)}", flush=True)
+    train_label_counts = _dataset_label_counts(train_ds)
+    val_label_counts = _dataset_label_counts(val_ds)
+    test_label_counts = _dataset_label_counts(test_ds) if test_ds is not None else {}
+    print(f"类别分布 train: {train_label_counts}", flush=True)
+    print(f"类别分布 val:   {val_label_counts}", flush=True)
     if test_ds is not None:
-        print(f"类别分布 test:  {_dataset_label_counts(test_ds)}", flush=True)
+        print(f"类别分布 test:  {test_label_counts}", flush=True)
     print(f"batch_size: {batch_size}, epochs: {max_epochs}", flush=True)
+    print(f"checkpoint_selection: {checkpoint_selection}", flush=True)
     print(
         "早停: "
         f"monitor=val_macro_f1, patience={patience}, min_delta={min_delta}, "
@@ -469,10 +560,21 @@ def run_training(
     optimizer = build_optimizer(model, experiment)
     class_weighting = str(class_weighting_override if class_weighting_override is not None else experiment.get("class_weighting", "sqrt_balanced"))
     class_weights = _compute_class_weights(train_ds, int(config["num_classes"]), device, mode=class_weighting)
+    train_class_counts = _dataset_class_count_tensor(train_ds, int(config["num_classes"]), device)
+    logit_adjustment = None
+    if class_weighting.lower() in {"balanced_softmax", "logit_adjusted"}:
+        tau = float(experiment.get("logit_adjustment_tau", 1.0))
+        logit_adjustment = compute_class_logit_adjustment(train_class_counts, tau=tau)
+        print(
+            f"Logit-adjusted CE: mode={class_weighting}, tau={tau}, "
+            f"adjustment={logit_adjustment.detach().cpu().tolist()}",
+            flush=True,
+        )
     if class_weights is None:
         print("类别加权 CE: disabled", flush=True)
     else:
         print(f"类别加权 CE: mode={class_weighting}, weights={class_weights.detach().cpu().tolist()}", flush=True)
+    final_class_weights = class_weights
     best_selection_score = -1.0
     best_raw_macro_f1 = -1.0
     best_state = None
@@ -480,7 +582,14 @@ def run_training(
     epochs_without_improvement = 0
     history: list[dict[str, float]] = []
     for epoch in range(max_epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, class_weights=class_weights)
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            class_weights=class_weights,
+            logit_adjustment=logit_adjustment,
+        )
         metrics = evaluate_loader(model, val_loader, device, num_classes=int(config["num_classes"]))
         recent_macro_f1 = [row["val_macro_f1"] for row in history[-(val_metric_smoothing - 1):]] if val_metric_smoothing > 1 else []
         recent_macro_f1.append(float(metrics["macro_f1"]))
@@ -508,7 +617,7 @@ def run_training(
             best_raw_macro_f1 = float(metrics["macro_f1"])
             best_epoch = epoch + 1
             epochs_without_improvement = 0
-            best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+            best_state = snapshot_state_dict(model)
             print(
                 f"  保存当前最佳模型: val_macro_f1={best_raw_macro_f1:.4f}, "
                 f"selection_score={best_selection_score:.4f}",
@@ -526,13 +635,19 @@ def run_training(
             if patience > 0 and can_stop and epochs_without_improvement >= patience:
                 print(f"触发早停：验证集 macro-F1 连续 {patience} 轮未提升。", flush=True)
                 break
-    if best_state is not None:
+    last_state = snapshot_state_dict(model)
+    if checkpoint_selection == "best_val" and best_state is not None:
         model.load_state_dict(best_state)
+        model_selection_rule = "best_val_checkpoint"
+    elif checkpoint_selection == "last":
+        model.load_state_dict(last_state)
+        model_selection_rule = "last_checkpoint"
+    else:
+        model_selection_rule = "best_val_checkpoint"
     selection_val_metrics = evaluate_loader(model, val_loader, device, num_classes=int(config["num_classes"]))
     final_model = model
-    model_selection_rule = "best_val_checkpoint"
     if refit_trainval:
-        selected_epochs = max(1, int(best_epoch or len(history) or max_epochs))
+        selected_epochs = max(1, int((len(history) if checkpoint_selection == "last" else best_epoch) or len(history) or max_epochs))
         print(
             f"使用 train+val 重新训练最终模型 {selected_epochs} 轮；验证集仅用于选择 epoch，不作为最终独立验证集。",
             flush=True,
@@ -543,19 +658,62 @@ def run_training(
         final_model = build_experiment_model(config, device, op_pretrained=op_pretrained, eis_pretrained=eis_pretrained)
         final_optimizer = build_optimizer(final_model, experiment)
         final_class_weights = _compute_class_weights(trainval_ds, int(config["num_classes"]), device, mode=class_weighting)
+        final_logit_adjustment = None
+        if class_weighting.lower() in {"balanced_softmax", "logit_adjusted"}:
+            final_counts = _dataset_class_count_tensor(trainval_ds, int(config["num_classes"]), device)
+            tau = float(experiment.get("logit_adjustment_tau", 1.0))
+            final_logit_adjustment = compute_class_logit_adjustment(final_counts, tau=tau)
+            print(
+                f"Refit logit-adjusted CE: mode={class_weighting}, tau={tau}, "
+                f"adjustment={final_logit_adjustment.detach().cpu().tolist()}",
+                flush=True,
+            )
+        if final_class_weights is None:
+            print("Refit 类别加权 CE: disabled", flush=True)
+        else:
+            print(
+                f"Refit 类别加权 CE: mode={class_weighting}, weights={final_class_weights.detach().cpu().tolist()}",
+                flush=True,
+            )
         for refit_epoch in range(selected_epochs):
-            refit_loss = train_one_epoch(final_model, trainval_loader, final_optimizer, device, class_weights=final_class_weights)
+            refit_loss = train_one_epoch(
+                final_model,
+                trainval_loader,
+                final_optimizer,
+                device,
+                class_weights=final_class_weights,
+                logit_adjustment=final_logit_adjustment,
+            )
             print(
                 f"Refit {refit_epoch + 1:03d}/{selected_epochs:03d} | trainval_loss={refit_loss:.6f}",
                 flush=True,
             )
-        model_selection_rule = "best_val_epoch_then_refit_trainval"
+        model_selection_rule = "last_epoch_then_refit_trainval" if checkpoint_selection == "last" else "best_val_epoch_then_refit_trainval"
     final_metrics = dict(selection_val_metrics)
     final_metrics["selection_val"] = selection_val_metrics
     final_metrics["model_selection_rule"] = model_selection_rule
+    final_metrics["checkpoint_selection"] = checkpoint_selection
+    final_metrics["selected_checkpoint"] = "selected.ckpt"
+    final_metrics["checkpoint_aliases"] = checkpoint_alias_names(checkpoint_selection)
     final_metrics["refit_trainval"] = bool(refit_trainval)
     final_metrics["class_weighting"] = class_weighting
-    final_metrics["class_weights"] = class_weights.detach().cpu().tolist() if class_weights is not None else None
+    final_metrics["optimizer_settings"] = {
+        "lr": float(experiment.get("lr", 0.0)),
+        "weight_decay": float(experiment.get("weight_decay", 0.0)),
+    }
+    final_metrics["class_weights"] = final_class_weights.detach().cpu().tolist() if final_class_weights is not None else None
+    final_metrics["selection_class_weights"] = class_weights.detach().cpu().tolist() if class_weights is not None else None
+    final_metrics["final_class_weights_source"] = "train_val" if refit_trainval else "train"
+    final_metrics["split_diagnostics"] = {
+        "train_size": int(n_train),
+        "val_size": int(n_val),
+        "test_size": int(n_test),
+        "train_label_counts": train_label_counts,
+        "val_label_counts": val_label_counts,
+        "test_label_counts": test_label_counts,
+        "min_val_class_support": min(val_label_counts.values()) if val_label_counts else 0,
+        "min_test_class_support": min(test_label_counts.values()) if test_label_counts else 0,
+    }
     if refit_trainval:
         final_metrics["refit_val_in_sample"] = evaluate_loader(final_model, val_loader, device, num_classes=int(config["num_classes"]))
     if test_ds is not None:
@@ -587,36 +745,41 @@ def run_training(
                     "best_val_macro_f1": best_raw_macro_f1,
                     "best_selection_score": best_selection_score,
                     "epochs_ran": len(history),
+                    "checkpoint_selection": checkpoint_selection,
                     "class_weighting": class_weighting,
                 },
             },
             target_dir / "best_val.ckpt",
         )
-    torch.save(
-        {
-            "model_state_dict": final_model.state_dict(),
-            "config": config,
-            "history": history,
-            "early_stopping": {
-                "monitor": "val_macro_f1",
-                "selection_score": "smoothed_val_macro_f1",
-                "patience": patience,
-                "min_delta": min_delta,
-                "min_epochs_before_stop": min_epochs_before_stop,
-                "val_metric_smoothing": val_metric_smoothing,
-                "best_epoch": best_epoch,
-                "best_val_macro_f1": best_raw_macro_f1,
-                "best_selection_score": best_selection_score,
-                "epochs_ran": len(history),
-                "model_selection_rule": model_selection_rule,
-                "refit_trainval": bool(refit_trainval),
-                "class_weighting": class_weighting,
-            },
+    final_checkpoint_payload = {
+        "model_state_dict": final_model.state_dict(),
+        "config": config,
+        "history": history,
+        "checkpoint_aliases": checkpoint_alias_names(checkpoint_selection),
+        "early_stopping": {
+            "monitor": "val_macro_f1",
+            "selection_score": "smoothed_val_macro_f1",
+            "patience": patience,
+            "min_delta": min_delta,
+            "min_epochs_before_stop": min_epochs_before_stop,
+            "val_metric_smoothing": val_metric_smoothing,
+            "best_epoch": best_epoch,
+            "best_val_macro_f1": best_raw_macro_f1,
+            "best_selection_score": best_selection_score,
+            "epochs_ran": len(history),
+            "checkpoint_selection": checkpoint_selection,
+            "model_selection_rule": model_selection_rule,
+            "refit_trainval": bool(refit_trainval),
+            "class_weighting": class_weighting,
         },
-        target_dir / "best.ckpt",
-    )
+    }
+    for checkpoint_name in checkpoint_alias_names(checkpoint_selection):
+        torch.save(final_checkpoint_payload, target_dir / checkpoint_name)
     print("训练完成。已保存:", flush=True)
     print(f"  {target_dir / 'best.ckpt'}", flush=True)
+    print(f"  {target_dir / 'selected.ckpt'}", flush=True)
+    if checkpoint_selection == "last":
+        print(f"  {target_dir / 'last.ckpt'}", flush=True)
     print(f"  {target_dir / 'metrics.json'}", flush=True)
     print(f"  {target_dir / 'summary.csv'}", flush=True)
     print(f"  {target_dir / 'confusion_matrix.csv'}", flush=True)
@@ -642,7 +805,10 @@ def parse_args(args: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--refit-trainval", action=argparse.BooleanOptionalAction, default=None, help="Select epoch on val, then refit final model on train+val")
     parser.add_argument("--min-epochs-before-stop", type=int, default=None, help="Do not trigger early stopping before this epoch")
     parser.add_argument("--val-metric-smoothing", type=int, default=None, help="Moving average window for val macro-F1 selection score")
-    parser.add_argument("--class-weighting", choices=["sqrt_balanced", "balanced", "inverse_frequency", "effective_number", "none"], default=None, help="Class weighting mode for neural-network CE loss")
+    parser.add_argument("--class-weighting", choices=["sqrt_balanced", "balanced", "inverse_frequency", "effective_number", "balanced_softmax", "logit_adjusted", "none"], default=None, help="Class weighting/loss adjustment mode for neural-network CE loss")
+    parser.add_argument("--lr", type=float, default=None, help="Temporarily override experiment.lr")
+    parser.add_argument("--weight-decay", type=float, default=None, help="Temporarily override experiment.weight_decay")
+    parser.add_argument("--checkpoint-selection", choices=["best_val", "best-val", "last"], default=None, help="Select final checkpoint by validation score or by the last trained epoch")
     return parser.parse_args(args)
 
 
@@ -662,6 +828,9 @@ def main() -> None:
         args.min_epochs_before_stop,
         args.val_metric_smoothing,
         args.class_weighting,
+        args.lr,
+        args.weight_decay,
+        args.checkpoint_selection,
     )
 
 

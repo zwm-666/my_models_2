@@ -2,7 +2,7 @@
 
 **Condition-Aware Prototype Transport for PEMFC Fault Classification**
 
-> 当前真实论文实验请优先阅读 `README_训练测试绘图.md` 和 `KAGGLE_运行说明.md`。这两个文件中的命令已经按四比例基准对比、消融实验和一组噪声鲁棒性实验整理，并默认不启用类别感知滑窗补偿。
+> 当前真实论文实验请优先阅读 `docs/README_训练测试绘图.md` 和 `docs/KAGGLE_运行说明.md`。这两个文件中的命令已经按四比例基准对比、消融实验和一组噪声鲁棒性实验整理，并默认不启用类别感知滑窗补偿。
 
 A multi-modal deep learning framework for Proton Exchange Membrane Fuel Cell (PEMFC) fault classification. CAPT-UniShape extends UniShape (AAAI 2026) with condition-aware attention pooling, cross-modal shape interaction, and a Condition-Aware Prototype Transport (CAPT) classification head.
 
