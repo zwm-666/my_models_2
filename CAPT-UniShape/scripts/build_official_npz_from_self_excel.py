@@ -1,6 +1,6 @@
 """Convert self-measured Excel data to the NPZ format used by official models.
 
-The source Excel (`data/raw/测试数据.xlsx`) contains 216 single-cell
+The source Excel (`data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx`) contains 216 single-cell
 voltages, nine impedance/EIS statistical features, three stack-level variables,
 timestamps and labels.  This converter reuses the existing group-stratified
 Excel loader to avoid leakage, then builds the three official model inputs:
@@ -57,9 +57,13 @@ def _dataset_arrays(dataset: Any) -> tuple[np.ndarray[Any, Any], np.ndarray[Any,
     return x_op, x_cond, labels
 
 
-def _build_eis_sequence(x_cond: np.ndarray[Any, Any], eis_seq_len: int) -> np.ndarray[Any, Any]:
-    """Create four EIS-like ordered channels from nine impedance statistics."""
-    eis_stats = x_cond[:, : len(EIS_COLS)].astype(np.float32)
+def _build_eis_sequence(eis_stats: np.ndarray[Any, Any], eis_seq_len: int) -> np.ndarray[Any, Any]:
+    """Create four EIS-like ordered channels from nine impedance statistics.
+    
+    Args:
+        eis_stats: [N, 9] array of impedance statistics (from EIS_COLS).
+        eis_seq_len: target sequence length for interpolation.
+    """
     source_grid = np.linspace(0.0, 1.0, eis_stats.shape[1], dtype=np.float32)
     target_grid = np.linspace(0.0, 1.0, int(eis_seq_len), dtype=np.float32)
     sequences: list[np.ndarray[Any, Any]] = []
@@ -386,13 +390,20 @@ def _build_stack_windows(
     min_val_class_groups: int,
     min_test_class_groups: int,
     prefer_balanced_train_groups: bool,
-) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], dict[str, object]]:
+) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], dict[str, object]]:
     df = pd.read_excel(Path(excel_path), sheet_name=sheet_name, engine="openpyxl")
-    expected = set(STACK_COLS + COND_COLS + [TIME_COL, LABEL_COL])
+    expected = set(STACK_COLS + COND_COLS + EIS_COLS + [TIME_COL, LABEL_COL])
     missing = expected - set(df.columns)
     if missing:
         raise ValueError(f"Missing expected columns in Excel: {sorted(missing)}")
     df = df.copy()
+    # Encode string labels to integers: 正常=0, 过干=1, 过湿=2
+    label_map = {"正常": 0, "过干": 1, "过湿": 2}
+    if df[LABEL_COL].dtype == object:
+        unmapped = set(df[LABEL_COL].unique()) - set(label_map.keys())
+        if unmapped:
+            raise ValueError(f"Unknown labels: {unmapped}. Expected: {list(label_map.keys())}")
+        df[LABEL_COL] = df[LABEL_COL].map(label_map).astype(int)
     if split_mode == "segment":
         df["__group_key__"] = _derive_segment_group_keys(
             df,
@@ -434,9 +445,11 @@ def _build_stack_windows(
 
     df[STACK_COLS] = df[STACK_COLS].fillna(0)
     df[COND_COLS] = df[COND_COLS].fillna(0)
+    df[EIS_COLS] = df[EIS_COLS].fillna(0)
     train_df = df[df["__group_key__"].isin(list(g_tr_set))].copy()
     _, stack_mean, stack_std = normalize_columns(train_df, STACK_COLS)
     _, cond_mean, cond_std = normalize_columns(train_df, COND_COLS)
+    _, eis_mean, eis_std = normalize_columns(train_df, EIS_COLS)
 
     def _apply_norm(frame: pd.DataFrame, cols: list[str], means: dict[str, float], stds: dict[str, float]) -> pd.DataFrame:
         frame = frame.copy()
@@ -447,6 +460,7 @@ def _build_stack_windows(
 
     df = _apply_norm(df, STACK_COLS, stack_mean, stack_std)
     df = _apply_norm(df, COND_COLS, cond_mean, cond_std)
+    df = _apply_norm(df, EIS_COLS, eis_mean, eis_std)
 
     train_group_labels = np.array([group_label_map[g] for g in g_tr])
     train_stride_by_label = (
@@ -465,9 +479,10 @@ def _build_stack_windows(
         group_set: set[object],
         stride: int,
         stride_by_label: dict[int, int] | None = None,
-    ) -> tuple[list[np.ndarray[Any, Any]], list[np.ndarray[Any, Any]], list[int], list[int]]:
+    ) -> tuple[list[np.ndarray[Any, Any]], list[np.ndarray[Any, Any]], list[np.ndarray[Any, Any]], list[int], list[int]]:
         windows: list[np.ndarray[Any, Any]] = []
         conds: list[np.ndarray[Any, Any]] = []
+        eis_stats_list: list[np.ndarray[Any, Any]] = []
         labels: list[int] = []
         group_ids: list[int] = []
         stride_map = stride_by_label or {}
@@ -478,26 +493,30 @@ def _build_stack_windows(
             group_stride = max(1, int(stride_map.get(label, stride)))
             stack_values = group_df[STACK_COLS].to_numpy(dtype=np.float32)
             cond_values = group_df[COND_COLS].to_numpy(dtype=np.float32)
+            eis_values = group_df[EIS_COLS].to_numpy(dtype=np.float32)
             row_count = len(group_df)
             if row_count < window_size:
                 stack_padded = np.pad(stack_values, ((0, window_size - row_count), (0, 0)), mode="edge")
                 windows.append(stack_padded.T.astype(np.float32))
                 conds.append(cond_values.mean(axis=0).astype(np.float32))
+                eis_stats_list.append(eis_values.mean(axis=0).astype(np.float32))
                 labels.append(label)
                 group_ids.append(int(group_to_int[group]))
             else:
                 for start in range(0, row_count - window_size + 1, group_stride):
                     windows.append(stack_values[start : start + window_size].T.astype(np.float32))
                     conds.append(cond_values[start : start + window_size].mean(axis=0).astype(np.float32))
+                    eis_stats_list.append(eis_values[start : start + window_size].mean(axis=0).astype(np.float32))
                     labels.append(label)
                     group_ids.append(int(group_to_int[group]))
-        return windows, conds, labels, group_ids
+        return windows, conds, eis_stats_list, labels, group_ids
 
-    train_w, train_c, train_y, train_gid = _windows(g_tr_set, stride_train, train_stride_by_label)
-    val_w, val_c, val_y, val_gid = _windows(g_va_set, stride_val)
-    test_w, test_c, test_y, test_gid = _windows(g_te_set, stride_eval)
+    train_w, train_c, train_eis, train_y, train_gid = _windows(g_tr_set, stride_train, train_stride_by_label)
+    val_w, val_c, val_eis, val_y, val_gid = _windows(g_va_set, stride_val)
+    test_w, test_c, test_eis, test_y, test_gid = _windows(g_te_set, stride_eval)
     x_op = np.asarray(train_w + val_w + test_w, dtype=np.float32)
     x_cond = np.asarray(train_c + val_c + test_c, dtype=np.float32)
+    x_eis_stats = np.asarray(train_eis + val_eis + test_eis, dtype=np.float32)
     labels = np.asarray(train_y + val_y + test_y, dtype=np.int64)
     group_ids = np.asarray(train_gid + val_gid + test_gid, dtype=np.int64)
     split = np.concatenate([
@@ -523,7 +542,7 @@ def _build_stack_windows(
         "split_quality": split_quality,
     }
     meta["group_id_count"] = int(len(np.unique(group_ids)))
-    return x_op, x_cond, labels, split, meta | {"group_ids": group_ids}
+    return x_op, x_cond, x_eis_stats, labels, split, meta | {"group_ids": group_ids}
 
 
 def build_npz(
@@ -568,7 +587,7 @@ def build_npz(
     if resolved_min_train_stride > resolved_max_train_stride:
         raise ValueError("min_train_stride must be <= max_train_stride")
     if op_source == "stack":
-            x_op, x_cond, labels, split, meta = _build_stack_windows(
+            x_op, x_cond, x_eis_stats, labels, split, meta = _build_stack_windows(
             excel_path=excel_path,
             sheet_name=sheet_name,
             window_size=window_size,
@@ -623,6 +642,8 @@ def build_npz(
         x_cond = np.concatenate([train_cond, val_cond, test_cond], axis=0)
         labels = np.concatenate([train_y, val_y, test_y], axis=0)
         group_ids = np.arange(labels.shape[0], dtype=np.int64)
+        # For cells mode, EIS stats come from the first 9 dims of old-style cond
+        x_eis_stats = x_cond[:, :len(EIS_COLS)].astype(np.float32)
         split = np.concatenate([
             np.zeros(len(train_y), dtype=np.int64),
             np.ones(len(val_y), dtype=np.int64),
@@ -630,7 +651,7 @@ def build_npz(
         ])
     else:
         raise ValueError("op_source must be 'stack' or 'cells'")
-    x_eis = _build_eis_sequence(x_cond, eis_seq_len=eis_seq_len)
+    x_eis = _build_eis_sequence(x_eis_stats, eis_seq_len=eis_seq_len)
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -714,7 +735,7 @@ def build_npz(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build official CAPT-UniShape NPZ from 测试数据.xlsx")
-    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--output", default="data/processed/official_self_multisource.npz")
     parser.add_argument("--sheet-name", default="Sheet1")
     parser.add_argument("--window-size", type=int, default=256)

@@ -288,7 +288,7 @@ def _run_attempt(args: argparse.Namespace, attempt: ProposedAttempt) -> dict[str
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="只跑 proposed 模型，直到测试准确率达到阈值")
-    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--output-root", default="results/codex_proposed_accuracy_search")
     parser.add_argument("--data-root", default="data/processed/codex_proposed_accuracy_search")
     parser.add_argument("--target-accuracy", type=float, default=0.95)

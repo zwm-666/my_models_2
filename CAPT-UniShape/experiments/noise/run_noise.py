@@ -133,7 +133,7 @@ def _metric_row(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="运行单一训练/测试比例下的噪声鲁棒性实验")
-    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--ratio", default="8_2", choices=list(RATIO_TO_TEST_SIZE.keys()))
     parser.add_argument("--models", nargs="+", default=list(MODELS.keys()), choices=list(MODELS.keys()))
     parser.add_argument("--noise-stds", nargs="+", type=float, default=[0.0, 0.01, 0.03, 0.05, 0.10])
@@ -171,7 +171,7 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     data_root.mkdir(parents=True, exist_ok=True)
 
-    clean_npz = data_root / f"official_self_stack_impedance_eis_w{args.window_size}_{args.ratio}_clean.npz"
+    clean_npz = data_root / f"self_seed{args.seed}_{args.ratio}.npz"
     print(f"\n=== 构建干净数据: train/test={args.ratio.replace('_', ':')} ===", flush=True)
     build_npz(
         excel_path=ROOT / args.excel,

@@ -182,7 +182,7 @@ def _run_diagnosis(results_root: str, data_root: str) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="运行多 seed 官方基准实验并汇总测试集均值/方差")
-    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--ratios", nargs="+", default=RATIO_KEYS, choices=RATIO_KEYS)
     parser.add_argument("--models", nargs="+", default=MODEL_KEYS, choices=MODEL_KEYS)
     parser.add_argument("--seeds", nargs="+", type=int, default=[42, 43, 44])

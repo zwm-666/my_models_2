@@ -7,7 +7,7 @@ c_op: 6
 op_seq_len: 256
 c_eis: 4
 eis_seq_len: 128
-d_cond: 10
+d_cond: 7
 num_classes: 3
 
 # Shared representation size.

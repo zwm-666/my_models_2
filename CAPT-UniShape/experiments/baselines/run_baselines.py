@@ -803,7 +803,7 @@ def run_proposed_model(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="运行提出模型与传统机器学习/深度学习/Transformer/iTransformer 基准对比实验")
-    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--ratios", nargs="+", default=list(RATIO_TO_TEST_SIZE.keys()), choices=list(RATIO_TO_TEST_SIZE.keys()))
     parser.add_argument("--models", nargs="+", default=list(MODEL_CATEGORIES.keys()), choices=list(MODEL_CATEGORIES.keys()))
     parser.add_argument("--output-root", default="results/official_baseline_comparison")

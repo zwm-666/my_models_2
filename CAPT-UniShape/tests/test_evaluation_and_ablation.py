@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import torch
@@ -63,6 +64,53 @@ class ResidualKANFusionTests(unittest.TestCase):
 
 
 class AblationSwitchTests(unittest.TestCase):
+    def test_official_ablation_default_variants_match_required_table(self) -> None:
+        from scripts.run_official_ablation_experiments import ABLATIONS, DEFAULT_ABLATION_VARIANTS
+
+        self.assertEqual(
+            DEFAULT_ABLATION_VARIANTS,
+            ["full_rbf", "no_rbf", "no_kan_fusion", "static_prototype", "no_condition_input"],
+        )
+        self.assertEqual(ABLATIONS["full_rbf"]["config"], "configs/proposed.yaml")
+        self.assertEqual(ABLATIONS["no_rbf"]["config"], "configs/proposed_no_rbf.yaml")
+
+    def test_official_ablation_can_read_full_metrics_row(self) -> None:
+        from scripts.run_official_ablation_experiments import _copy_existing_metric_row
+
+        with TemporaryDirectory() as tmpdir:
+            metrics_path = Path(tmpdir) / "metrics.json"
+            metrics_path.write_text(
+                """
+{
+  "accuracy": 1.0,
+  "macro_f1": 0.9,
+  "weighted_f1": 0.95,
+  "inference_time_per_sample_ms": 12.34567,
+  "classification_report": {
+    "0": {"precision": 1.0, "recall": 0.75, "f1-score": 0.857142}
+  },
+  "parameter_count": 1234,
+  "artifact_semantics": {"top_level_metrics": "test"}
+}
+""",
+                encoding="utf-8",
+            )
+
+            row = _copy_existing_metric_row("full_rbf", "完整模型", metrics_path)
+
+        self.assertEqual(row["variant"], "full_rbf")
+        self.assertAlmostEqual(row["test_accuracy"], 1.0)
+        self.assertAlmostEqual(row["test_macro_f1"], 0.9)
+        self.assertAlmostEqual(row["class0_recall"], 0.75)
+        self.assertEqual(row["parameter_count"], 1234)
+
+    def test_official_ablation_default_data_points_to_updated_self_dataset(self) -> None:
+        from scripts.run_official_ablation_experiments import parse_args
+
+        args = parse_args([])
+
+        self.assertEqual(args.data, "data/processed/self_seed44_8_2.npz")
+
     def test_fixed_equal_fusion_replaces_condition_gates(self) -> None:
         from models.capt_unishape_kanfusion_no_rbf import OfficialCAPTUniShapeKANFusionNoRBF
 

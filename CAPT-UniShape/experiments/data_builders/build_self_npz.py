@@ -1,6 +1,6 @@
 """Convert self-measured Excel data to the NPZ format used by official models.
 
-The source Excel (`data/raw/测试数据.xlsx`) contains 216 single-cell
+The source Excel (`data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx`) contains 216 single-cell
 voltages, nine impedance/EIS statistical features, three stack-level variables,
 timestamps and labels.  This converter reuses the existing group-stratified
 Excel loader to avoid leakage, then builds the three official model inputs:
@@ -714,7 +714,7 @@ def build_npz(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build official CAPT-UniShape NPZ from 测试数据.xlsx")
-    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--output", default="data/processed/official_self_multisource.npz")
     parser.add_argument("--sheet-name", default="Sheet1")
     parser.add_argument("--window-size", type=int, default=256)

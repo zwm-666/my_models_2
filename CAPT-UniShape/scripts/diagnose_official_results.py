@@ -72,8 +72,8 @@ def _infer_ratio_model(metrics_path: Path, results_root: Path) -> tuple[str, str
 
 def _candidate_summaries(data_root: Path, ratio: str) -> Iterable[Path]:
     if ratio:
-        yield data_root / f"official_self_stack_impedance_eis_w64_{ratio}.summary.json"
-        yield data_root / f"official_self_stack_impedance_eis_w64_{ratio}_fixed_base.summary.json"
+        yield data_root / f"self_seed44_{ratio}.summary.json"
+        yield data_root / f"self_seed44_{ratio}_fixed_base.summary.json"
     yield from sorted(data_root.rglob("*.summary.json"))
 
 

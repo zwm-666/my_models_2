@@ -266,7 +266,7 @@ def _aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run official single-seed multi-fold experiments")
-    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--sheet-name", default="Sheet1")
     parser.add_argument("--models", nargs="+", default=["proposed", "logreg", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"])
     parser.add_argument("--folds", type=int, default=5)

@@ -746,7 +746,7 @@ def _train_and_evaluate(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="重新生成 SNR 噪声测试结果，并替换总表中的旧噪声结果")
-    parser.add_argument("--clean-npz", default="data/processed/codex_baseline_selected_self_seed44_8_2/official_self_stack_impedance_eis_w64_8_2.npz")
+    parser.add_argument("--clean-npz", default="data/processed/codex_baseline_selected_self_seed44_8_2/self_seed44_8_2.npz")
     parser.add_argument("--reference-clean-summary", default="results/codex_baseline_selected_self_seed44_8_2/test_summary.csv")
     parser.add_argument("--old-summary", default="results/codex_snr_noise_baselines_proposed_seed44_8_2/summary.csv")
     parser.add_argument("--output-root", default="results/codex_snr_noise_baselines_proposed_seed44_8_2")

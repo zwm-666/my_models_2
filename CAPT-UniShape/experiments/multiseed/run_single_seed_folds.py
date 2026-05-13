@@ -266,7 +266,7 @@ def _aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run official single-seed multi-fold experiments")
-    parser.add_argument("--excel", default="data/raw/测试数据.xlsx")
+    parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--sheet-name", default="Sheet1")
     parser.add_argument("--models", nargs="+", default=["proposed", "logreg", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"])
     parser.add_argument("--folds", type=int, default=5)
@@ -322,7 +322,7 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     for fold_index, fold in enumerate(folds, start=1):
         fold_key = f"fold_{fold_index}"
-        npz_path = data_root / fold_key / f"official_self_stack_impedance_eis_w{args.window_size}_8_2.npz"
+        npz_path = data_root / fold_key / f"self_seed{args.seed}_8_2.npz"
         _build_fold_npz(df, group_label_map, row_counts, fold, npz_path, args)
         for model_key in args.models:
             run_dir = output_root / fold_key / "8_2" / model_key
