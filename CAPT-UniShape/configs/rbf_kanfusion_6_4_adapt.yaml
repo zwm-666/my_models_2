@@ -2,7 +2,6 @@ model_name: official_capt_unishape_rbf_kanfusion
 use_rbf_head: true
 use_residual_kan_fusion: true
 
-# Input definition: operation sequence, EIS spectrum and stack condition vector.
 c_op: 6
 op_seq_len: 256
 c_eis: 4
@@ -10,46 +9,52 @@ eis_seq_len: 128
 d_cond: 10
 num_classes: 3
 
-# Shared representation size.
 d_model: 96
 hidden_dim: 192
 fusion_hidden_dim: 192
 dropout: 0.3
 feature_dropout: 0.3
 stochastic_depth_p: 0.2
-mixup_alpha: 0.2
+mixup_alpha: 0.0
+se_hidden_dim: 32
 
-# Official UniShape wrapper.
 freeze_unishape_backbone: false
 channel_aggregation: attention
 scale_len: 3
 
-# Residual KAN-Fusion.
 kan_bottleneck_dim: 32
 kan_num_basis: 4
 kan_lambda: 0.1
 learnable_kan_lambda: true
 
-# RBF condition-aware prototype head.
-temperature: 0.07
+temperature: 0.15
 num_rbf_centers: 16
+mapper_output_scale: 0.1
 use_condition_transport: true
-alpha_transport: 0.001
+alpha_transport: 0.0001
 alpha_sep: 0.001
 alpha_kan: 0.0001
 label_smoothing: 0.0
 
 experiment:
-  output_dir: results/official_unishape_rbf_kanfusion
+  output_dir: results/official_unishape_rbf_kanfusion_6_4_adapt
   seeds: [44]
   batch_size: 32
-  epochs: 5
+  epochs: 30
   patience: 10
   min_delta: 0.0001
-  refit_trainval: false
-  min_epochs_before_stop: 30
+  refit_trainval: true
+  min_epochs_before_stop: 20
   val_metric_smoothing: 5
-  class_weighting: sqrt_balanced
-  lr: 0.0001
+  class_weighting: effective_number
+  lr: 0.00005
   weight_decay: 0.0005
-  selection_score: macro_f1_gap_penalty
+  selection_score: val_train_holdout_macro_f1
+  use_ema: true
+  ema_decay: 0.999
+  use_swa: true
+  swa_last_n: 5
+  sequence_mixup_alpha: 0.3
+  time_mask_min_steps: 8
+  time_mask_max_steps: 16
+  train_holdout_group_ratio: 0.1

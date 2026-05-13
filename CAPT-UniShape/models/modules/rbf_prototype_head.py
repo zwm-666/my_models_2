@@ -56,6 +56,7 @@ class RBFPrototypeHead(nn.Module):
         num_classes: int,
         temperature: float = 0.07,
         num_rbf_centers: int = 16,
+        mapper_output_scale: float = 0.02,
         separation_margin: float = 0.2,
         use_condition_transport: bool = True,
     ) -> None:
@@ -71,6 +72,7 @@ class RBFPrototypeHead(nn.Module):
             num_classes=self.num_classes,
             d_model=self.d_model,
             num_centers=int(num_rbf_centers),
+            output_scale=float(mapper_output_scale),
         )
         self.log_temperature = nn.Parameter(torch.log(torch.tensor(float(temperature))))
 

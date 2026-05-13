@@ -62,6 +62,22 @@ class ResidualKANFusionTests(unittest.TestCase):
         self.assertLess(disabled_params, enabled_params)
 
 
+class AblationSwitchTests(unittest.TestCase):
+    def test_fixed_equal_fusion_replaces_condition_gates(self) -> None:
+        from models.capt_unishape_kanfusion_no_rbf import OfficialCAPTUniShapeKANFusionNoRBF
+
+        model = OfficialCAPTUniShapeKANFusionNoRBF(use_condition_gating=False)
+        z_op = torch.tensor([[1.0, 2.0]])
+        z_eis = torch.tensor([[3.0, 5.0]])
+        z_cond = torch.tensor([[7.0, 11.0]])
+
+        z_fused, g_op, g_eis = model._fuse_modal_features(z_op, z_eis, z_cond)
+
+        self.assertTrue(torch.equal(z_fused, z_op + z_eis + z_cond))
+        self.assertTrue(torch.equal(g_op, torch.ones_like(z_op)))
+        self.assertTrue(torch.equal(g_eis, torch.ones_like(z_eis)))
+
+
 class TrainingUtilityTests(unittest.TestCase):
     def test_snapshot_state_dict_clones_parameter_values(self) -> None:
         from train import snapshot_state_dict

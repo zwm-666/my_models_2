@@ -7,6 +7,7 @@ Expected NPZ keys for real data: ``x_op`` [N,C_op,T], ``x_eis`` [N,C_eis,F],
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 from importlib import import_module
 import json
@@ -14,6 +15,7 @@ import random
 import sys
 import time
 import warnings
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterable, Protocol, cast, runtime_checkable
 
@@ -21,6 +23,7 @@ import numpy as np
 import torch
 from sklearn.exceptions import UndefinedMetricWarning
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 import yaml
 
@@ -59,6 +62,8 @@ class FuelCellNPZDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor,
         label_key = "labels" if "labels" in data else "y"
         self.x_cond = torch.as_tensor(data[cond_key][indexer], dtype=torch.float32)
         self.labels = torch.as_tensor(data[label_key][indexer], dtype=torch.long)
+        group_key = "group_ids" if "group_ids" in data else None
+        self.group_ids = torch.as_tensor(data[group_key][indexer], dtype=torch.long) if group_key else torch.arange(len(self.labels), dtype=torch.long)
         if not (len(self.x_op) == len(self.x_eis) == len(self.x_cond) == len(self.labels)):
             raise ValueError("NPZ arrays must have the same first dimension")
 
@@ -125,6 +130,40 @@ def build_datasets_from_npz(
     )
 
 
+def split_train_holdout_by_groups(
+    dataset: FuelCellNPZDataset,
+    holdout_ratio: float,
+    seed: int,
+) -> tuple[Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]], Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] | None]:
+    ratio = float(holdout_ratio)
+    if ratio <= 0.0:
+        return dataset, None
+    group_ids = dataset.group_ids.detach().cpu().numpy()
+    labels = dataset.labels.detach().cpu().numpy()
+    unique_groups = np.unique(group_ids)
+    group_labels = np.array([int(labels[np.where(group_ids == gid)[0][0]]) for gid in unique_groups], dtype=np.int64)
+    holdout_groups: list[int] = []
+    for label in sorted(np.unique(group_labels).tolist()):
+        class_groups = unique_groups[group_labels == label]
+        if class_groups.size <= 1:
+            continue
+        desired = int(round(float(class_groups.size) * ratio))
+        keep = min(class_groups.size - 1, max(1, desired))
+        if keep <= 0:
+            continue
+        train_g, holdout_g = train_test_split(class_groups, test_size=keep, random_state=int(seed) + int(label))
+        del train_g
+        holdout_groups.extend([int(gid) for gid in holdout_g.tolist()])
+    if not holdout_groups:
+        return dataset, None
+    holdout_group_set = set(holdout_groups)
+    fit_indices = np.asarray([idx for idx, gid in enumerate(group_ids.tolist()) if gid not in holdout_group_set], dtype=np.int64)
+    holdout_indices = np.asarray([idx for idx, gid in enumerate(group_ids.tolist()) if gid in holdout_group_set], dtype=np.int64)
+    if fit_indices.size == 0 or holdout_indices.size == 0:
+        return dataset, None
+    return Subset(dataset, fit_indices.tolist()), Subset(dataset, holdout_indices.tolist())
+
+
 def count_parameters(model: torch.nn.Module) -> int:
     return int(sum(parameter.numel() for parameter in model.parameters()))
 
@@ -132,6 +171,80 @@ def count_parameters(model: torch.nn.Module) -> int:
 def snapshot_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     """Create an immutable CPU snapshot of a model state dict."""
     return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+
+def average_state_dicts(states: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    if not states:
+        raise ValueError("average_state_dicts requires at least one state dict")
+    averaged: dict[str, torch.Tensor] = {}
+    for key in states[0]:
+        tensors = [state[key] for state in states]
+        first = tensors[0]
+        if torch.is_floating_point(first):
+            stacked = torch.stack([tensor.to(torch.float32) for tensor in tensors], dim=0)
+            averaged[key] = stacked.mean(dim=0).to(first.dtype)
+        else:
+            averaged[key] = first.clone()
+    return averaged
+
+
+def create_ema_model(model: torch.nn.Module) -> torch.nn.Module:
+    ema_model = copy.deepcopy(model)
+    ema_model.eval()
+    for parameter in ema_model.parameters():
+        parameter.requires_grad_(False)
+    return ema_model
+
+
+def update_ema_model(ema_model: torch.nn.Module, model: torch.nn.Module, decay: float) -> None:
+    with torch.no_grad():
+        ema_state = ema_model.state_dict()
+        model_state = model.state_dict()
+        for key, value in model_state.items():
+            if key not in ema_state:
+                continue
+            ema_value = ema_state[key]
+            if torch.is_floating_point(ema_value):
+                ema_value.mul_(float(decay)).add_(value.detach(), alpha=float(1.0 - decay))
+            else:
+                ema_value.copy_(value.detach())
+
+
+def apply_time_mask(sequence: torch.Tensor, min_steps: int, max_steps: int) -> torch.Tensor:
+    if sequence.ndim != 3 or max_steps <= 0:
+        return sequence
+    seq_len = int(sequence.shape[-1])
+    if seq_len <= 1:
+        return sequence
+    min_len = max(1, min(int(min_steps), seq_len))
+    max_len = max(min_len, min(int(max_steps), seq_len))
+    masked = sequence.clone()
+    for batch_index in range(masked.shape[0]):
+        span = int(np.random.randint(min_len, max_len + 1))
+        if span >= seq_len:
+            masked[batch_index] = 0.0
+            continue
+        start = int(np.random.randint(0, seq_len - span + 1))
+        masked[batch_index, :, start : start + span] = 0.0
+    return masked
+
+
+def apply_relative_gaussian_noise(sequence: torch.Tensor, std_min: float, std_max: float) -> torch.Tensor:
+    if std_max <= 0.0:
+        return sequence
+    if std_min < 0.0 or std_max < std_min:
+        raise ValueError(f"Invalid noise std range: min={std_min}, max={std_max}")
+    if sequence.ndim < 2:
+        return sequence
+    batch_size = int(sequence.shape[0])
+    if batch_size == 0:
+        return sequence
+    noise_levels = torch.empty(batch_size, device=sequence.device, dtype=sequence.dtype).uniform_(float(std_min), float(std_max))
+    view_shape = [batch_size] + [1] * (sequence.ndim - 1)
+    reduce_dims = tuple(range(1, sequence.ndim))
+    scale = sequence.detach().to(torch.float32).std(dim=reduce_dims, unbiased=False, keepdim=True).clamp_min(1e-6)
+    noise = torch.randn_like(sequence) * scale.to(sequence.dtype) * noise_levels.view(*view_shape)
+    return sequence + noise
 
 
 def normalize_checkpoint_selection(value: str | None) -> str:
@@ -155,6 +268,45 @@ def checkpoint_alias_names(checkpoint_selection: str) -> list[str]:
     if selection == "last":
         names.append("last.ckpt")
     return names
+
+
+def normalize_selection_score_type(value: str | None) -> str:
+    normalized = str(value or "macro_f1").lower().replace("-", "_")
+    aliases = {
+        "macro_f1": "macro_f1",
+        "val_macro_f1": "macro_f1",
+        "macro_f1_class0_recall": "macro_f1_class0_recall",
+        "macro_f1_plus_class0_recall": "macro_f1_class0_recall",
+        "macro_f1_gap_penalty": "macro_f1_gap_penalty",
+        "macro_f1_train_val_gap": "macro_f1_gap_penalty",
+        "val_train_holdout_macro_f1": "val_train_holdout_macro_f1",
+        "joint_holdout_macro_f1": "val_train_holdout_macro_f1",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            f"Unsupported selection_score: {value!r}. Use macro_f1, macro_f1_class0_recall, macro_f1_gap_penalty, or val_train_holdout_macro_f1."
+        )
+    return aliases[normalized]
+
+
+def _compute_selection_score(
+    metrics: dict[str, Any],
+    history: list[dict[str, float]],
+    selection_score_type: str,
+    val_metric_smoothing: int,
+) -> float:
+    if selection_score_type == "macro_f1_gap_penalty":
+        train_macro_f1 = float(metrics["train_macro_f1"])
+        val_macro_f1 = float(metrics["macro_f1"])
+        gap_penalty = -abs(train_macro_f1 - val_macro_f1)
+        return float(0.5 * val_macro_f1 + 0.5 * gap_penalty)
+    if selection_score_type == "val_train_holdout_macro_f1":
+        return float(0.7 * float(metrics["macro_f1"]) + 0.3 * float(metrics["train_holdout_macro_f1"]))
+    if selection_score_type == "macro_f1_class0_recall":
+        return float(0.6 * float(metrics["macro_f1"]) + 0.4 * float(metrics["class0_recall"]))
+    recent_macro_f1 = [row["val_macro_f1"] for row in history[-(val_metric_smoothing - 1):]] if val_metric_smoothing > 1 else []
+    recent_macro_f1.append(float(metrics["macro_f1"]))
+    return float(np.mean(np.asarray(recent_macro_f1, dtype=np.float64)))
 
 
 def set_reproducible_seed(seed: int) -> None:
@@ -183,6 +335,7 @@ def build_experiment_model(
     device: torch.device,
     op_pretrained: str | None = None,
     eis_pretrained: str | None = None,
+    init_checkpoint: str | Path | None = None,
 ) -> torch.nn.Module:
     model_obj = build_model_from_config(config)
     if not isinstance(model_obj, torch.nn.Module):
@@ -196,6 +349,15 @@ def build_experiment_model(
             raise AttributeError("Model does not support load_official_unishape_weights")
         load_report = load_weights(op_checkpoint=op_ckpt, eis_checkpoint=eis_ckpt)
         print(f"Loaded official UniShape checkpoints: {load_report}", flush=True)
+    init_ckpt = init_checkpoint or config.get("init_checkpoint")
+    if init_ckpt:
+        payload = torch.load(init_ckpt, map_location="cpu")
+        state_dict = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(
+            f"Loaded init checkpoint: {init_ckpt} | missing={len(missing)} | unexpected={len(unexpected)}",
+            flush=True,
+        )
     return model
 
 
@@ -339,6 +501,8 @@ def evaluate_loader(
         "accuracy": float(accuracy_score(labels_np, preds)),
         "macro_f1": float(report["macro avg"]["f1-score"]),
         "weighted_f1": float(report["weighted avg"]["f1-score"]),
+        "class0_recall": float(report.get("0", {}).get("recall", 0.0)),
+        "class0_f1": float(report.get("0", {}).get("f1-score", 0.0)),
         "classification_report": report,
         "per_class_f1": per_class_f1,
         "confusion_matrix": confusion_matrix(labels_np, preds, labels=label_ids).tolist(),
@@ -439,30 +603,83 @@ def train_one_epoch(
     device: torch.device,
     class_weights: torch.Tensor | None = None,
     logit_adjustment: torch.Tensor | None = None,
-) -> float:
+    ema_model: torch.nn.Module | None = None,
+    ema_decay: float = 0.999,
+    sequence_mixup_alpha: float = 0.0,
+    time_mask_min_steps: int = 0,
+    time_mask_max_steps: int = 0,
+    sequence_noise_std_min: float = 0.0,
+    sequence_noise_std_max: float = 0.0,
+) -> dict[str, float]:
     model.train()
     total = 0.0
     seen = 0
+    preds_all: list[torch.Tensor] = []
+    labels_all: list[torch.Tensor] = []
     for x_op, x_eis, x_cond, labels in loader:
+        x_op = x_op.to(device)
+        x_eis = x_eis.to(device)
+        x_cond = x_cond.to(device)
+        labels = labels.to(device)
+        mixup_labels_b: torch.Tensor | None = None
+        mixup_lambda: float | None = None
+        if sequence_mixup_alpha > 0.0 and x_op.shape[0] > 1:
+            beta_dist = torch.distributions.Beta(sequence_mixup_alpha, sequence_mixup_alpha)
+            mixup_lambda = float(beta_dist.sample().item())
+            permutation = torch.randperm(x_op.shape[0], device=device)
+            x_op = mixup_lambda * x_op + (1.0 - mixup_lambda) * x_op[permutation]
+            x_eis = mixup_lambda * x_eis + (1.0 - mixup_lambda) * x_eis[permutation]
+            x_cond = mixup_lambda * x_cond + (1.0 - mixup_lambda) * x_cond[permutation]
+            mixup_labels_b = labels[permutation]
+        if time_mask_max_steps > 0:
+            x_op = apply_time_mask(x_op, time_mask_min_steps, time_mask_max_steps)
+            x_eis = apply_time_mask(x_eis, time_mask_min_steps, time_mask_max_steps)
+        if sequence_noise_std_max > 0.0:
+            x_op = apply_relative_gaussian_noise(x_op, sequence_noise_std_min, sequence_noise_std_max)
+            x_eis = apply_relative_gaussian_noise(x_eis, sequence_noise_std_min, sequence_noise_std_max)
         optimizer.zero_grad(set_to_none=True)
         logits, loss_dict = model(
-            x_op.to(device),
-            x_eis.to(device),
-            x_cond.to(device),
-            labels.to(device),
+            x_op,
+            x_eis,
+            x_cond,
+            labels,
             class_weights=class_weights,
             logit_adjustment=logit_adjustment,
         )
-        del logits
         loss = loss_dict["total_loss"]
         if loss is None:
             raise RuntimeError("Model did not return total_loss while labels were provided")
+        if mixup_labels_b is not None and mixup_lambda is not None:
+            loss_logits = logits if logit_adjustment is None else logits + logit_adjustment.to(logits.device)
+            ce_loss_a = torch.nn.functional.cross_entropy(loss_logits, labels, weight=class_weights)
+            ce_loss_b = torch.nn.functional.cross_entropy(loss_logits, mixup_labels_b, weight=class_weights)
+            ce_loss = float(mixup_lambda) * ce_loss_a + (1.0 - float(mixup_lambda)) * ce_loss_b
+            regularizer = loss - loss_dict.get("ce_loss", loss)
+            loss = ce_loss + regularizer
         loss.backward()
         optimizer.step()
+        if ema_model is not None:
+            update_ema_model(ema_model, model, decay=ema_decay)
         batch_size = int(labels.shape[0])
         total += float(loss.detach().cpu()) * batch_size
         seen += batch_size
-    return total / max(seen, 1)
+        preds_all.append(logits.detach().cpu().argmax(dim=1))
+        labels_all.append(labels.detach().cpu())
+    preds = torch.cat(preds_all, dim=0).numpy() if preds_all else np.empty((0,), dtype=np.int64)
+    labels_np = torch.cat(labels_all, dim=0).numpy() if labels_all else np.empty((0,), dtype=np.int64)
+    label_ids = list(range(int(max(labels_np.max(initial=0), preds.max(initial=0)) + 1))) if labels_np.size else [0]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
+        report = cast(
+            dict[str, Any],
+            classification_report(labels_np, preds, labels=label_ids, output_dict=True, zero_division="warn"),
+        )
+    return {
+        "loss": total / max(seen, 1),
+        "accuracy": float(accuracy_score(labels_np, preds)) if labels_np.size else 0.0,
+        "macro_f1": float(report["macro avg"]["f1-score"]) if labels_np.size else 0.0,
+        "weighted_f1": float(report["weighted avg"]["f1-score"]) if labels_np.size else 0.0,
+    }
 
 
 def run_training(
@@ -482,6 +699,8 @@ def run_training(
     lr_override: float | None = None,
     weight_decay_override: float | None = None,
     checkpoint_selection_override: str | None = None,
+    selection_score_override: str | None = None,
+    init_checkpoint_override: str | None = None,
 ) -> dict[str, Any]:
     experiment = apply_experiment_overrides(
         config.get("experiment", {}),
@@ -496,12 +715,20 @@ def run_training(
     print(f"数据文件: {data_path}", flush=True)
     print(f"随机种子: {seed}", flush=True)
     train_ds, val_ds, test_ds = build_datasets_from_npz(data_path, seed=seed, val_ratio=float(experiment.get("val_ratio", 0.2)))
+    full_train_ds = train_ds
+    train_holdout_ratio = float(experiment.get("train_holdout_group_ratio", 0.0))
+    train_fit_ds, train_holdout_ds = (
+        split_train_holdout_by_groups(train_ds, holdout_ratio=train_holdout_ratio, seed=seed)
+        if isinstance(train_ds, FuelCellNPZDataset)
+        else (train_ds, None)
+    )
     probe_dataset = train_ds if isinstance(train_ds, FuelCellNPZDataset) else FuelCellNPZDataset(data_path)
     config = sync_config_with_dataset(config, probe_dataset)
     config = attach_effective_experiment_settings(config, experiment)
     batch_size = int(batch_size_override or experiment.get("batch_size", 8))
-    train_loader = make_loader(train_ds, batch_size=batch_size, shuffle=True, seed=seed)
+    train_loader = make_loader(train_fit_ds, batch_size=batch_size, shuffle=True, seed=seed)
     val_loader = make_loader(val_ds, batch_size=batch_size, shuffle=False, seed=seed)
+    train_holdout_loader = make_loader(train_holdout_ds, batch_size=batch_size, shuffle=False, seed=seed) if train_holdout_ds is not None else None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     target_dir = Path(output_dir or experiment.get("output_dir", "results/official_unishape_run"))
     max_epochs = int(epochs_override or experiment.get("epochs", 5))
@@ -524,25 +751,42 @@ def run_training(
     checkpoint_selection = normalize_checkpoint_selection(
         checkpoint_selection_override if checkpoint_selection_override is not None else experiment.get("checkpoint_selection", "best_val")
     )
+    selection_score_type = normalize_selection_score_type(
+        selection_score_override if selection_score_override is not None else experiment.get("selection_score", "macro_f1")
+    )
+    init_checkpoint = init_checkpoint_override if init_checkpoint_override is not None else experiment.get("init_checkpoint")
+    use_ema = bool(experiment.get("use_ema", False))
+    ema_decay = float(experiment.get("ema_decay", 0.999))
+    use_swa = bool(experiment.get("use_swa", False))
+    swa_last_n = int(experiment.get("swa_last_n", 5))
+    sequence_mixup_alpha = float(experiment.get("sequence_mixup_alpha", 0.0))
+    time_mask_min_steps = int(experiment.get("time_mask_min_steps", 0))
+    time_mask_max_steps = int(experiment.get("time_mask_max_steps", 0))
+    sequence_noise_std_min = float(experiment.get("sequence_noise_std_min", 0.0))
+    sequence_noise_std_max = float(experiment.get("sequence_noise_std_max", 0.0))
     print(f"设备: {device}", flush=True)
     if not isinstance(train_ds, _SizedDataset) or not isinstance(val_ds, _SizedDataset):
         raise TypeError("train_ds and val_ds must provide __len__")
-    n_train = len(train_ds)
+    n_train = len(train_fit_ds)
     n_val = len(val_ds)
     n_test = len(test_ds) if test_ds is not None else 0
     print(f"训练/验证/测试样本数: {n_train} / {n_val} / {n_test}", flush=True)
-    train_label_counts = _dataset_label_counts(train_ds)
+    train_label_counts = _dataset_label_counts(train_fit_ds)
     val_label_counts = _dataset_label_counts(val_ds)
     test_label_counts = _dataset_label_counts(test_ds) if test_ds is not None else {}
+    train_holdout_label_counts = _dataset_label_counts(train_holdout_ds) if train_holdout_ds is not None else {}
     print(f"类别分布 train: {train_label_counts}", flush=True)
     print(f"类别分布 val:   {val_label_counts}", flush=True)
     if test_ds is not None:
         print(f"类别分布 test:  {test_label_counts}", flush=True)
+    if train_holdout_ds is not None:
+        print(f"类别分布 train_holdout: {train_holdout_label_counts}", flush=True)
     print(f"batch_size: {batch_size}, epochs: {max_epochs}", flush=True)
     print(f"checkpoint_selection: {checkpoint_selection}", flush=True)
+    print(f"selection_score_type: {selection_score_type}", flush=True)
     print(
         "早停: "
-        f"monitor=val_macro_f1, patience={patience}, min_delta={min_delta}, "
+        f"monitor={selection_score_type}, patience={patience}, min_delta={min_delta}, "
         f"min_epochs_before_stop={min_epochs_before_stop}, smoothing={val_metric_smoothing}",
         flush=True,
     )
@@ -556,7 +800,8 @@ def run_training(
         flush=True,
     )
     print(f"输出目录: {target_dir}", flush=True)
-    model = build_experiment_model(config, device, op_pretrained=op_pretrained, eis_pretrained=eis_pretrained)
+    model = build_experiment_model(config, device, op_pretrained=op_pretrained, eis_pretrained=eis_pretrained, init_checkpoint=init_checkpoint)
+    ema_model = create_ema_model(model) if use_ema else None
     optimizer = build_optimizer(model, experiment)
     class_weighting = str(class_weighting_override if class_weighting_override is not None else experiment.get("class_weighting", "sqrt_balanced"))
     class_weights = _compute_class_weights(train_ds, int(config["num_classes"]), device, mode=class_weighting)
@@ -577,36 +822,77 @@ def run_training(
     final_class_weights = class_weights
     best_selection_score = -1.0
     best_raw_macro_f1 = -1.0
+    best_train_macro_f1 = -1.0
     best_state = None
     best_epoch = 0
     epochs_without_improvement = 0
     history: list[dict[str, float]] = []
+    top_checkpoints: list[dict[str, Any]] = []
+    swa_states: deque[dict[str, torch.Tensor]] = deque(maxlen=max(1, swa_last_n))
     for epoch in range(max_epochs):
-        train_loss = train_one_epoch(
+        train_metrics = train_one_epoch(
             model,
             train_loader,
             optimizer,
             device,
             class_weights=class_weights,
             logit_adjustment=logit_adjustment,
+            ema_model=ema_model,
+            ema_decay=ema_decay,
+            sequence_mixup_alpha=sequence_mixup_alpha,
+            time_mask_min_steps=time_mask_min_steps,
+            time_mask_max_steps=time_mask_max_steps,
+            sequence_noise_std_min=sequence_noise_std_min,
+            sequence_noise_std_max=sequence_noise_std_max,
         )
-        metrics = evaluate_loader(model, val_loader, device, num_classes=int(config["num_classes"]))
-        recent_macro_f1 = [row["val_macro_f1"] for row in history[-(val_metric_smoothing - 1):]] if val_metric_smoothing > 1 else []
-        recent_macro_f1.append(float(metrics["macro_f1"]))
-        selection_score = float(np.mean(np.asarray(recent_macro_f1, dtype=np.float64)))
+        eval_model = ema_model if ema_model is not None else model
+        metrics = evaluate_loader(eval_model, val_loader, device, num_classes=int(config["num_classes"]))
+        if train_holdout_loader is not None:
+            holdout_metrics = evaluate_loader(eval_model, train_holdout_loader, device, num_classes=int(config["num_classes"]))
+            metrics["train_holdout_macro_f1"] = float(holdout_metrics["macro_f1"])
+            metrics["train_holdout_accuracy"] = float(holdout_metrics["accuracy"])
+        else:
+            metrics["train_holdout_macro_f1"] = float(metrics["macro_f1"])
+            metrics["train_holdout_accuracy"] = float(metrics["accuracy"])
+        metrics["train_macro_f1"] = float(train_metrics["macro_f1"])
+        metrics["train_accuracy"] = float(train_metrics["accuracy"])
+        gap_penalty = -abs(float(train_metrics["macro_f1"]) - float(metrics["macro_f1"]))
+        metrics["train_val_gap_penalty"] = gap_penalty
+        selection_score = _compute_selection_score(metrics, history, selection_score_type, val_metric_smoothing)
+        epoch_state = snapshot_state_dict(eval_model)
+        swa_states.append(epoch_state)
         history.append(
             {
                 "epoch": float(epoch + 1),
-                "train_loss": train_loss,
+                "train_loss": float(train_metrics["loss"]),
+                "train_accuracy": float(train_metrics["accuracy"]),
+                "train_macro_f1": float(train_metrics["macro_f1"]),
+                "val_accuracy": float(metrics["accuracy"]),
                 "val_macro_f1": float(metrics["macro_f1"]),
+                "val_class0_recall": float(metrics["class0_recall"]),
+                "train_holdout_macro_f1": float(metrics["train_holdout_macro_f1"]),
+                "train_val_gap_penalty": float(gap_penalty),
                 "selection_score": selection_score,
+                "lr": float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else 0.0,
             }
         )
+        top_checkpoints.append(
+            {
+                "epoch": int(epoch + 1),
+                "score": float(selection_score),
+                "state": epoch_state,
+            }
+        )
+        top_checkpoints = sorted(top_checkpoints, key=lambda item: (item["score"], item["epoch"]), reverse=True)[:3]
         print(
             f"Epoch {epoch + 1:03d}/{max_epochs:03d} | "
-            f"train_loss={train_loss:.6f} | "
+            f"train_loss={train_metrics['loss']:.6f} | "
+            f"train_macro_f1={train_metrics['macro_f1']:.4f} | "
             f"val_acc={metrics['accuracy']:.4f} | "
             f"val_macro_f1={metrics['macro_f1']:.4f} | "
+            f"val_class0_recall={metrics['class0_recall']:.4f} | "
+            f"train_holdout_macro_f1={metrics['train_holdout_macro_f1']:.4f} | "
+            f"gap_penalty={gap_penalty:.4f} | "
             f"selection_score={selection_score:.4f} | "
             f"infer_ms={metrics['inference_time_per_sample_ms']:.2f}",
             flush=True,
@@ -615,11 +901,13 @@ def run_training(
         if improved:
             best_selection_score = selection_score
             best_raw_macro_f1 = float(metrics["macro_f1"])
+            best_train_macro_f1 = float(train_metrics["macro_f1"])
             best_epoch = epoch + 1
             epochs_without_improvement = 0
-            best_state = snapshot_state_dict(model)
+            best_state = epoch_state
             print(
-                f"  保存当前最佳模型: val_macro_f1={best_raw_macro_f1:.4f}, "
+                f"  保存当前最佳模型: train_macro_f1={best_train_macro_f1:.4f}, "
+                f"val_macro_f1={best_raw_macro_f1:.4f}, "
                 f"selection_score={best_selection_score:.4f}",
                 flush=True,
             )
@@ -627,35 +915,53 @@ def run_training(
             epochs_without_improvement += 1
             print(
                 f"  早停计数: {epochs_without_improvement}/{patience}"
-                f"（最佳 epoch={best_epoch}, best_val_macro_f1={best_raw_macro_f1:.4f}, "
+                f"（最佳 epoch={best_epoch}, best_train_macro_f1={best_train_macro_f1:.4f}, best_val_macro_f1={best_raw_macro_f1:.4f}, "
                 f"best_selection_score={best_selection_score:.4f}）",
                 flush=True,
             )
             can_stop = (epoch + 1) >= min_epochs_before_stop
             if patience > 0 and can_stop and epochs_without_improvement >= patience:
-                print(f"触发早停：验证集 macro-F1 连续 {patience} 轮未提升。", flush=True)
+                print(f"触发早停：验证集 {selection_score_type} 连续 {patience} 轮未提升。", flush=True)
                 break
     last_state = snapshot_state_dict(model)
+    if use_swa and len(swa_states) > 1:
+        swa_state = average_state_dicts(list(swa_states))
+        if ema_model is not None:
+            ema_model.load_state_dict(swa_state)
+        else:
+            model.load_state_dict(swa_state)
     if checkpoint_selection == "best_val" and best_state is not None:
-        model.load_state_dict(best_state)
-        model_selection_rule = "best_val_checkpoint"
+        top_states = [item["state"] for item in top_checkpoints]
+        averaged_state = average_state_dicts(top_states) if len(top_states) > 1 else best_state
+        model.load_state_dict(averaged_state)
+        model_selection_rule = "top3_avg_best_val_checkpoint" if len(top_states) > 1 else "best_val_checkpoint"
     elif checkpoint_selection == "last":
         model.load_state_dict(last_state)
         model_selection_rule = "last_checkpoint"
     else:
         model_selection_rule = "best_val_checkpoint"
+    if ema_model is not None:
+        model.load_state_dict(ema_model.state_dict())
+        model_selection_rule = f"{model_selection_rule}_ema"
     selection_val_metrics = evaluate_loader(model, val_loader, device, num_classes=int(config["num_classes"]))
     final_model = model
     if refit_trainval:
-        selected_epochs = max(1, int((len(history) if checkpoint_selection == "last" else best_epoch) or len(history) or max_epochs))
+        averaged_best_epoch = (
+            int(round(sum(int(item["epoch"]) for item in top_checkpoints) / len(top_checkpoints)))
+            if checkpoint_selection == "best_val" and top_checkpoints
+            else best_epoch
+        )
+        selected_epochs = max(1, int((len(history) if checkpoint_selection == "last" else averaged_best_epoch) or len(history) or max_epochs))
         print(
             f"使用 train+val 重新训练最终模型 {selected_epochs} 轮；验证集仅用于选择 epoch，不作为最终独立验证集。",
             flush=True,
         )
         set_reproducible_seed(seed)
-        trainval_ds = ConcatDataset([train_ds, val_ds])
+        trainval_ds = ConcatDataset([full_train_ds, val_ds])
         trainval_loader = make_loader(trainval_ds, batch_size=batch_size, shuffle=True, seed=seed + 100_003)
-        final_model = build_experiment_model(config, device, op_pretrained=op_pretrained, eis_pretrained=eis_pretrained)
+        final_model = build_experiment_model(config, device, op_pretrained=op_pretrained, eis_pretrained=eis_pretrained, init_checkpoint=init_checkpoint)
+        refit_ema_model = create_ema_model(final_model) if use_ema else None
+        refit_swa_states: deque[dict[str, torch.Tensor]] = deque(maxlen=max(1, swa_last_n))
         final_optimizer = build_optimizer(final_model, experiment)
         final_class_weights = _compute_class_weights(trainval_ds, int(config["num_classes"]), device, mode=class_weighting)
         final_logit_adjustment = None
@@ -683,14 +989,40 @@ def run_training(
                 device,
                 class_weights=final_class_weights,
                 logit_adjustment=final_logit_adjustment,
+                ema_model=refit_ema_model,
+                ema_decay=ema_decay,
+                sequence_mixup_alpha=sequence_mixup_alpha,
+                time_mask_min_steps=time_mask_min_steps,
+                time_mask_max_steps=time_mask_max_steps,
+                sequence_noise_std_min=sequence_noise_std_min,
+                sequence_noise_std_max=sequence_noise_std_max,
             )
+            refit_eval_model = refit_ema_model if refit_ema_model is not None else final_model
+            refit_swa_states.append(snapshot_state_dict(refit_eval_model))
             print(
-                f"Refit {refit_epoch + 1:03d}/{selected_epochs:03d} | trainval_loss={refit_loss:.6f}",
+                f"Refit {refit_epoch + 1:03d}/{selected_epochs:03d} | trainval_loss={refit_loss['loss']:.6f}",
                 flush=True,
             )
+        if use_swa and len(refit_swa_states) > 1:
+            swa_refit_state = average_state_dicts(list(refit_swa_states))
+            if refit_ema_model is not None:
+                refit_ema_model.load_state_dict(swa_refit_state)
+            else:
+                final_model.load_state_dict(swa_refit_state)
+        if refit_ema_model is not None:
+            final_model.load_state_dict(refit_ema_model.state_dict())
         model_selection_rule = "last_epoch_then_refit_trainval" if checkpoint_selection == "last" else "best_val_epoch_then_refit_trainval"
     final_metrics = dict(selection_val_metrics)
     final_metrics["selection_val"] = selection_val_metrics
+    final_metrics["selection_score_type"] = selection_score_type
+    final_metrics["selection_score"] = float(best_selection_score)
+    final_metrics["top_checkpoint_count"] = int(len(top_checkpoints))
+    final_metrics["top_checkpoint_epochs"] = [int(item["epoch"]) for item in top_checkpoints]
+    final_metrics["train_macro_f1"] = float(best_train_macro_f1)
+    final_metrics["train_val_gap_penalty"] = float(-abs(best_train_macro_f1 - best_raw_macro_f1))
+    final_metrics["train_holdout_group_ratio"] = float(train_holdout_ratio)
+    final_metrics["val_class0_recall"] = float(selection_val_metrics.get("class0_recall", 0.0))
+    final_metrics["val_class0_f1"] = float(selection_val_metrics.get("class0_f1", 0.0))
     final_metrics["model_selection_rule"] = model_selection_rule
     final_metrics["checkpoint_selection"] = checkpoint_selection
     final_metrics["selected_checkpoint"] = "selected.ckpt"
@@ -709,6 +1041,7 @@ def run_training(
         "val_size": int(n_val),
         "test_size": int(n_test),
         "train_label_counts": train_label_counts,
+        "train_holdout_label_counts": train_holdout_label_counts,
         "val_label_counts": val_label_counts,
         "test_label_counts": test_label_counts,
         "min_val_class_support": min(val_label_counts.values()) if val_label_counts else 0,
@@ -735,14 +1068,16 @@ def run_training(
                 "config": config,
                 "history": history,
                 "early_stopping": {
-                    "monitor": "val_macro_f1",
-                    "selection_score": "smoothed_val_macro_f1",
+                    "monitor": selection_score_type,
+                    "selection_score_type": selection_score_type,
                     "patience": patience,
                     "min_delta": min_delta,
                     "min_epochs_before_stop": min_epochs_before_stop,
                     "val_metric_smoothing": val_metric_smoothing,
                     "best_epoch": best_epoch,
+                    "top_checkpoint_epochs": [int(item["epoch"]) for item in top_checkpoints],
                     "best_val_macro_f1": best_raw_macro_f1,
+                    "best_train_macro_f1": best_train_macro_f1,
                     "best_selection_score": best_selection_score,
                     "epochs_ran": len(history),
                     "checkpoint_selection": checkpoint_selection,
@@ -757,14 +1092,16 @@ def run_training(
         "history": history,
         "checkpoint_aliases": checkpoint_alias_names(checkpoint_selection),
         "early_stopping": {
-            "monitor": "val_macro_f1",
-            "selection_score": "smoothed_val_macro_f1",
+            "monitor": selection_score_type,
+            "selection_score_type": selection_score_type,
             "patience": patience,
             "min_delta": min_delta,
             "min_epochs_before_stop": min_epochs_before_stop,
             "val_metric_smoothing": val_metric_smoothing,
             "best_epoch": best_epoch,
+            "top_checkpoint_epochs": [int(item["epoch"]) for item in top_checkpoints],
             "best_val_macro_f1": best_raw_macro_f1,
+            "best_train_macro_f1": best_train_macro_f1,
             "best_selection_score": best_selection_score,
             "epochs_ran": len(history),
             "checkpoint_selection": checkpoint_selection,
@@ -809,6 +1146,8 @@ def parse_args(args: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=None, help="Temporarily override experiment.lr")
     parser.add_argument("--weight-decay", type=float, default=None, help="Temporarily override experiment.weight_decay")
     parser.add_argument("--checkpoint-selection", choices=["best_val", "best-val", "last"], default=None, help="Select final checkpoint by validation score or by the last trained epoch")
+    parser.add_argument("--selection-score", choices=["macro_f1", "macro_f1_class0_recall", "macro_f1_gap_penalty", "val_train_holdout_macro_f1"], default=None, help="Validation selection score used by checkpointing and early stopping")
+    parser.add_argument("--init-checkpoint", default=None, help="Warm-start full model weights from a previous checkpoint")
     return parser.parse_args(args)
 
 
@@ -831,6 +1170,8 @@ def main() -> None:
         args.lr,
         args.weight_decay,
         args.checkpoint_selection,
+        args.selection_score,
+        args.init_checkpoint,
     )
 
 

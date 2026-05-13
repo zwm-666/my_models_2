@@ -1,0 +1,49 @@
+# CAPT-UniShape 消融对照：去掉 RBF 动态原型头
+# 对应 Official-CAPT-UniShape-KANFusion-NoRBF
+model_name: official_capt_unishape_kanfusion_no_rbf
+use_rbf_head: false
+use_residual_kan_fusion: true
+
+# Input definition
+c_op: 6
+op_seq_len: 256
+c_eis: 4
+eis_seq_len: 128
+d_cond: 10
+num_classes: 3
+
+# Shared representation
+d_model: 128
+hidden_dim: 256
+fusion_hidden_dim: 256
+dropout: 0.1
+
+# Official UniShape wrapper
+freeze_unishape_backbone: false
+channel_aggregation: attention
+scale_len: 3
+
+# Residual KAN-Fusion
+kan_bottleneck_dim: 32
+kan_num_basis: 8
+kan_lambda: 0.1
+learnable_kan_lambda: true
+
+# No RBF head — uses MLP classifier
+alpha_kan: 0.0001
+label_smoothing: 0.0
+
+experiment:
+  output_dir: results/proposed_no_rbf
+  seeds: [44]
+  batch_size: 32
+  epochs: 80
+  patience: 10
+  min_delta: 0.0001
+  refit_trainval: false
+  min_epochs_before_stop: 20
+  val_metric_smoothing: 3
+  class_weighting: sqrt_balanced
+  lr: 0.0001
+  weight_decay: 0.0001
+  selection_score: macro_f1

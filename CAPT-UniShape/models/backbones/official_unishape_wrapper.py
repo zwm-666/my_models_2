@@ -98,6 +98,10 @@ class OfficialUniShapeBackboneWrapper(nn.Module):
         return self.extract_feature(x)
 
     def extract_feature(self, x: torch.Tensor) -> torch.Tensor:
+        feature, _ = self.extract_feature_with_attention(x)
+        return feature
+
+    def extract_feature_with_attention(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return a feature vector shaped ``[B, d_model]`` from ``x``.
 
         ``x`` must be ``[B, C, L]``.  ``C == 1`` is sent directly to official
@@ -113,7 +117,13 @@ class OfficialUniShapeBackboneWrapper(nn.Module):
             raise ValueError("Input must contain at least one channel")
 
         if channels == 1:
-            return self._extract_univariate_feature(x)
+            feature, temporal_attention = self._extract_univariate_feature_with_attention(x)
+            aux = {
+                "channel_weights": torch.ones((feature.shape[0], 1), device=feature.device, dtype=feature.dtype),
+                "channel_features": feature.unsqueeze(1),
+                "temporal_attention": temporal_attention.unsqueeze(1),
+            }
+            return feature, aux
 
         # UniShape is univariate, but running one Python/model call per channel
         # is very slow on CPU.  Folding channels into the batch dimension keeps
@@ -121,11 +131,22 @@ class OfficialUniShapeBackboneWrapper(nn.Module):
         # serial backbone calls with one larger batched call.
         batch = int(x.shape[0])
         batched_channels = x.contiguous().view(batch * channels, 1, length)
-        channel_features = self._extract_univariate_feature(batched_channels)
+        channel_features, temporal_attention = self._extract_univariate_feature_with_attention(batched_channels)
         stacked = channel_features.view(batch, channels, -1)  # [B, C, d_model]
-        return self._aggregate_channels(stacked)
+        temporal_attention = temporal_attention.view(batch, channels, -1)
+        aggregated, channel_weights = self._aggregate_channels_with_weights(stacked)
+        aux = {
+            "channel_weights": channel_weights,
+            "channel_features": stacked,
+            "temporal_attention": temporal_attention,
+        }
+        return aggregated, aux
 
     def _extract_univariate_feature(self, x: torch.Tensor) -> torch.Tensor:
+        feature, _ = self._extract_univariate_feature_with_attention(x)
+        return feature
+
+    def _extract_univariate_feature_with_attention(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         model = self.unishape_backbone
         window_size_list = [64, 32, 16, 8, 4]
         scale_index = model.scale_len - 1
@@ -147,21 +168,32 @@ class OfficialUniShapeBackboneWrapper(nn.Module):
             x_embed_seq = x_embed_seq.unsqueeze(1)
         trans_enc_class_token, _shape_tokens = model.transformer_enc(x_embed_seq, cls_token_in=cls_tokens)
         feature = model.fc_token_shape(trans_enc_class_token)
-        return self.output_projection(feature)
+        return self.output_projection(feature), attention_scores.squeeze(-1)
 
     def _aggregate_channels(self, features: torch.Tensor) -> torch.Tensor:
+        aggregated, _ = self._aggregate_channels_with_weights(features)
+        return aggregated
+
+    def _aggregate_channels_with_weights(self, features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         channels = features.shape[1]
         if self.channel_aggregation == "mean":
-            return features.mean(dim=1)
+            weights = torch.full(
+                (features.shape[0], channels),
+                1.0 / max(channels, 1),
+                device=features.device,
+                dtype=features.dtype,
+            )
+            return features.mean(dim=1), weights
         if self.channel_aggregation == "learnable_weighted":
             if channels > self.max_channels:
                 raise ValueError(f"Got {channels} channels, but max_channels={self.max_channels}")
             weights = torch.softmax(self.channel_logits[:channels], dim=0)
-            return torch.einsum("bcd,c->bd", features, weights)
+            expanded = weights.unsqueeze(0).expand(features.shape[0], -1)
+            return torch.einsum("bcd,c->bd", features, weights), expanded
 
         scores = self.channel_attention(features).squeeze(-1)
         weights = torch.softmax(scores, dim=1)
-        return torch.einsum("bcd,bc->bd", features, weights)
+        return torch.einsum("bcd,bc->bd", features, weights), weights
 
     def load_pretrained(self, checkpoint_path: str | Path, strict: bool = False) -> tuple[list[str], list[str]]:
         """Load official UniShape weights into the wrapped backbone.

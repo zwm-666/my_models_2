@@ -6,7 +6,9 @@ from scripts.build_ac_voltage_npz import (
     build_condition_features,
     build_eis_like_sequence,
     build_split_array,
+    resolve_processed_dir,
     resample_curve,
+    select_domain_subset,
 )
 
 
@@ -55,3 +57,40 @@ def test_old_to_new_split_uses_old_for_train_val_and_new_for_test() -> None:
     assert set(split[:6].tolist()) == {0, 1}
     assert np.all(split[6:] == 2)
     assert set(labels[split == 1].tolist()) == {0, 1, 2}
+
+
+def test_select_domain_subset_keeps_only_requested_domain() -> None:
+    curves = np.arange(24, dtype=np.float32).reshape(4, 6)
+    labels = np.array([0, 1, 0, 1], dtype=np.int64)
+    domains = np.array([0, 1, 0, 1], dtype=np.int64)
+    source_labels = np.array([10, 11, 12, 13], dtype=np.int64)
+    manifest = [
+        {"domain": "old_mea", "row_index": 0},
+        {"domain": "new_mea", "row_index": 1},
+        {"domain": "old_mea", "row_index": 2},
+        {"domain": "new_mea", "row_index": 3},
+    ]
+
+    out_curves, out_labels, out_domains, out_source_labels, out_manifest = select_domain_subset(
+        curves,
+        labels,
+        domains,
+        source_labels,
+        manifest,
+        domain_filter="old_mea",
+    )
+
+    assert out_curves.shape == (2, 6)
+    assert out_labels.tolist() == [0, 0]
+    assert out_domains.tolist() == [0, 0]
+    assert out_source_labels.tolist() == [10, 12]
+    assert [item["row_index"] for item in out_manifest] == [0, 2]
+
+
+def test_resolve_processed_dir_accepts_single_nested_layout(tmp_path: Path) -> None:
+    processed = tmp_path / "AC Voltage Responses" / "Processed_Data"
+    processed.mkdir(parents=True)
+
+    out = resolve_processed_dir(tmp_path)
+
+    assert out == processed
