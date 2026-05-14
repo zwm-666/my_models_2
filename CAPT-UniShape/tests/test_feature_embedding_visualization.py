@@ -125,6 +125,39 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
         self.assertEqual(features[0, :6].tolist(), [100.0, 10.0, 1.0, 102.0, 12.0, 2.0])
         self.assertEqual(features[0, 6:9].tolist(), [55.0, 5.5, 8.5])
 
+    def test_official_builder_accepts_label_alias_and_maps_fault_names(self) -> None:
+        import pandas as pd
+
+        from scripts.build_official_npz_from_self_excel import LABEL_COL, _prepare_label_column
+
+        frame = pd.DataFrame({"label": ["正常", "过湿", "水淹", "过干", "膜干"]})
+
+        prepared, source_col, label_map = _prepare_label_column(frame)
+
+        self.assertEqual(source_col, "label")
+        self.assertEqual(prepared[LABEL_COL].tolist(), [0, 1, 1, 2, 2])
+        self.assertEqual(label_map["过湿"], 1)
+        self.assertEqual(label_map["过干"], 2)
+
+    def test_raw_excel_all_numeric_mode_uses_supplemental_numeric_columns(self) -> None:
+        import pandas as pd
+
+        from scripts.plot_feature_embeddings import raw_feature_columns_for_mode
+
+        frame = pd.DataFrame(
+            {
+                "测试时间": pd.date_range("2026-01-01", periods=2, freq="min"),
+                "label": ["正常", "过湿"],
+                "总阻抗": [1.0, 2.0],
+                "电堆总电压": [10.0, 11.0],
+                "FC系统入口高压": [12.0, 13.0],
+            }
+        )
+
+        cols = raw_feature_columns_for_mode(frame, mode="all_numeric", label_col="label")
+
+        self.assertEqual(cols, ["总阻抗", "电堆总电压", "FC系统入口高压"])
+
     def test_parse_feature_keys_accepts_plus_separated_aux_features(self) -> None:
         from scripts.plot_feature_embeddings import parse_feature_keys
 

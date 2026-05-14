@@ -150,6 +150,21 @@ def _standardize(features: np.ndarray[Any, Any]) -> np.ndarray[Any, np.dtype[np.
     return (x - mean) / np.maximum(std, 1e-6)
 
 
+def raw_feature_columns_for_mode(frame: Any, *, mode: str, label_col: str) -> list[str]:
+    normalized = str(mode).lower()
+    if normalized == "all_numeric":
+        return [
+            str(col)
+            for col in frame.select_dtypes(include=[np.number]).columns
+            if str(col) not in {str(label_col), "__group_key__"}
+        ]
+    if normalized == "model_input":
+        from scripts.build_official_npz_from_self_excel import COND_COLS, STACK_COLS
+
+        return list(STACK_COLS) + list(COND_COLS)
+    raise ValueError(f"Unsupported raw feature mode: {mode!r}")
+
+
 def build_raw_self_window_feature_arrays(
     frame: Any,
     *,
@@ -193,7 +208,8 @@ def build_raw_self_window_feature_arrays(
                 else:
                     stack_window = stack_values[start : start + int(window_size)]
                     cond_window = cond_values[start : start + int(window_size)]
-                features.append(np.concatenate([stack_window.reshape(-1), cond_window.mean(axis=0)], axis=0).astype(np.float32))
+                cond_summary = cond_window.mean(axis=0) if cond_window.shape[1] else np.empty((0,), dtype=np.float32)
+                features.append(np.concatenate([stack_window.reshape(-1), cond_summary], axis=0).astype(np.float32))
                 labels.append(label)
     return np.asarray(features, dtype=np.float32), np.asarray(labels, dtype=np.int64)
 
@@ -224,6 +240,7 @@ def raw_self_excel_feature_matrix(
     min_test_class_groups: int,
     prefer_balanced_train_groups: bool,
     use_first_split_candidate: bool,
+    raw_feature_mode: str,
 ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.int64]], dict[str, Any]]:
     import pandas as pd
 
@@ -236,10 +253,12 @@ def raw_self_excel_feature_matrix(
         _derive_group_keys,
         _derive_segment_group_keys,
         _group_split,
+        _prepare_label_column,
         _split_quality,
     )
 
     frame = pd.read_excel(excel_path, sheet_name=sheet_name, engine="openpyxl")
+    frame, label_source_col, label_value_map = _prepare_label_column(frame)
     expected = set(STACK_COLS + COND_COLS + [TIME_COL, LABEL_COL])
     missing = expected - set(frame.columns)
     if missing:
@@ -314,13 +333,14 @@ def raw_self_excel_feature_matrix(
             prefer_balanced_train_groups=bool(prefer_balanced_train_groups),
         )
     group_to_int = {group: idx for idx, group in enumerate(sorted(groups, key=str))}
+    raw_feature_cols = raw_feature_columns_for_mode(frame, mode=raw_feature_mode, label_col=LABEL_COL)
     features_all, labels_all = build_raw_self_window_feature_arrays(
         frame,
         group_sets=[set(g_tr.tolist()), set(g_va.tolist()), set(g_te.tolist())],
         group_to_int=group_to_int,
         group_column="__group_key__",
-        stack_cols=list(STACK_COLS),
-        cond_cols=list(COND_COLS),
+        stack_cols=raw_feature_cols,
+        cond_cols=[],
         label_col=str(LABEL_COL),
         window_size=int(window_size),
         strides=[int(stride_train), int(stride_val), int(stride_eval)],
@@ -328,7 +348,11 @@ def raw_self_excel_feature_matrix(
     return features_all[indices], labels_all[indices], {
         "path": str(excel_path),
         "sheet_name": sheet_name,
-        "feature_source": "unstandardized Excel STACK_COLS window + raw COND_COLS window mean",
+        "feature_source": f"unstandardized Excel {raw_feature_mode} window",
+        "raw_feature_mode": str(raw_feature_mode),
+        "raw_feature_columns": raw_feature_cols,
+        "label_source_col": label_source_col,
+        "label_value_map": label_value_map,
         "feature_shape_all": list(features_all.shape),
         "split_quality": split_quality,
     }
@@ -642,6 +666,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test")
     parser.add_argument("--raw-self-excel", default=None, help="自测数据原始 Excel；提供后 (a) 使用未标准化 Excel 原始物理值")
     parser.add_argument("--raw-self-sheet", default="Sheet1")
+    parser.add_argument("--raw-feature-mode", choices=["model_input", "all_numeric"], default="model_input")
     parser.add_argument("--raw-window-size", type=int, default=64)
     parser.add_argument("--raw-stride-train", type=int, default=16)
     parser.add_argument("--raw-stride-val", type=int, default=32)
@@ -735,6 +760,7 @@ def main(argv: list[str] | None = None) -> None:
             min_test_class_groups=int(args.raw_min_test_class_groups),
             prefer_balanced_train_groups=bool(args.raw_prefer_balanced_train_groups),
             use_first_split_candidate=bool(args.raw_use_first_split_candidate),
+            raw_feature_mode=str(args.raw_feature_mode),
         )
         if not np.array_equal(raw_labels, labels):
             raise ValueError("Raw Excel labels do not align with selected NPZ labels; check raw split/window parameters.")

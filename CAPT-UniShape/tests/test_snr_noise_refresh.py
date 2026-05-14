@@ -111,7 +111,8 @@ class SnrNoiseRefreshTests(unittest.TestCase):
 
     def test_cli_defaults_to_same_run_clean_source(self) -> None:
         args = snr.parse_args([])
-        self.assertEqual(args.clean_source, "same-run")
+        self.assertEqual(args.clean_source, "reference")
+        self.assertEqual(args.summary_path, "results\\噪声对齐论文实验新表.csv")
 
     def test_compact_summary_uses_required_headers_and_four_decimals(self) -> None:
         import tempfile
@@ -336,7 +337,6 @@ class SnrNoiseRefreshTests(unittest.TestCase):
             "test_macro_f1": 0.75,
             "macro_f1_drop": 0.25,
             "test_weighted_f1": 0.8,
-            "class0_recall": 0.5,
             "test_inference_ms": 12.3456,
         }
 
@@ -350,10 +350,59 @@ class SnrNoiseRefreshTests(unittest.TestCase):
                 "75.00%",
                 "25.00%",
                 "80.00%",
-                "50.00%",
                 "12.346",
             ],
         )
+
+    def test_summary_fieldnames_do_not_include_class0_columns(self) -> None:
+        self.assertNotIn("class0_precision", snr.SUMMARY_FIELDNAMES)
+        self.assertNotIn("class0_recall", snr.SUMMARY_FIELDNAMES)
+        self.assertNotIn("class0_f1", snr.SUMMARY_FIELDNAMES)
+        self.assertEqual(
+            snr.EXPORT_FIELDNAMES,
+            [
+                "model",
+                "snr_db",
+                "test_accuracy",
+                "accuracy_drop",
+                "test_macro_f1",
+                "macro_f1_drop",
+                "test_weighted_f1",
+                "weighted_f1_drop",
+                "test_inference_ms",
+                "parameter_count",
+                "data_path",
+                "metrics_path",
+                "alignment_source",
+            ],
+        )
+
+    def test_export_row_uses_percent_strings_with_two_decimals(self) -> None:
+        row = snr.export_summary_row(
+            {
+                "model": "proposed",
+                "snr_db": "40",
+                "test_accuracy": 1.0,
+                "accuracy_drop": 0.12345,
+                "test_macro_f1": 0.815384615,
+                "macro_f1_drop": 0.184615384,
+                "test_weighted_f1": 0.931934732,
+                "weighted_f1_drop": 0.068065268,
+                "test_inference_ms": 25.2239,
+                "parameter_count": 6496573,
+                "data_path": "clean.npz",
+                "metrics_path": "metrics.json",
+                "clean_alignment_source": "comparison_summary_reference",
+            }
+        )
+        self.assertEqual(row["test_accuracy"], "100.00%")
+        self.assertEqual(row["accuracy_drop"], "12.35%")
+        self.assertEqual(row["test_macro_f1"], "81.54%")
+        self.assertEqual(row["macro_f1_drop"], "18.46%")
+        self.assertEqual(row["test_weighted_f1"], "93.19%")
+        self.assertEqual(row["weighted_f1_drop"], "6.81%")
+        self.assertEqual(row["test_inference_ms"], "25.2239")
+        self.assertEqual(row["alignment_source"], "comparison_summary_reference")
 
     def test_normalize_legacy_summary_row_schema(self) -> None:
         row = snr.normalize_summary_row_schema(
@@ -373,6 +422,271 @@ class SnrNoiseRefreshTests(unittest.TestCase):
         self.assertEqual(row["test_accuracy"], "1.0")
         self.assertEqual(row["test_macro_f1"], "1.0")
         self.assertEqual(row["test_weighted_f1"], "1.0")
+
+    def test_load_model_order_from_current_comparison_config_excludes_models(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "current_comparison_models.yaml"
+            config_path.write_text(
+                """proposed:
+  model_name: proposed_model
+baselines:
+  logreg: {}
+  svm: {}
+  random_forest: {}
+  mlp: {}
+  cnn1d: {}
+  transformer: {}
+  itransformer: {}
+excluded_models:
+  - svm
+  - lstm
+""",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                snr.load_model_order_from_current_comparison_config(config_path),
+                ["proposed", "logreg", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"],
+            )
+
+    def test_load_reference_clean_rows_from_comparison_summaries(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            baseline_summary = tmp / "test_summary.csv"
+            proposed_summary = tmp / "proposed_summary.csv"
+
+            with baseline_summary.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "ratio",
+                        "model",
+                        "accuracy",
+                        "macro_f1",
+                        "weighted_f1",
+                        "inference_ms",
+                        "parameter_count",
+                        "metrics_path",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "ratio": "8_2",
+                        "model": "svm",
+                        "accuracy": "89.39%",
+                        "macro_f1": "58.62%",
+                        "weighted_f1": "85.37%",
+                        "inference_ms": "0.0182",
+                        "parameter_count": "6.0000",
+                        "metrics_path": "results\\baseline\\svm\\metrics.json",
+                    }
+                )
+
+            with proposed_summary.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "ratio",
+                        "data",
+                        "output_dir",
+                        "test_accuracy",
+                        "test_macro_f1",
+                        "test_weighted_f1",
+                        "class0_recall",
+                        "test_inference_ms",
+                        "parameter_count",
+                        "metrics_json",
+                        "selected_ckpt",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "ratio": "8_2",
+                        "data": "data\\processed\\self_seed44_8_2.npz",
+                        "output_dir": "results\\proposed\\8_2",
+                        "test_accuracy": "100.00%",
+                        "test_macro_f1": "100.00%",
+                        "test_weighted_f1": "100.00%",
+                        "class0_recall": "100.00%",
+                        "test_inference_ms": "25.2239",
+                        "parameter_count": "6496573",
+                        "metrics_json": "results\\proposed\\8_2\\metrics.json",
+                        "selected_ckpt": "results\\proposed\\8_2\\selected.ckpt",
+                    }
+                )
+
+            rows = snr.load_reference_clean_rows_from_comparison_summaries(
+                baseline_summary_path=baseline_summary,
+                proposed_summary_path=proposed_summary,
+                model_order=["proposed", "svm"],
+                data_path=tmp / "clean.npz",
+            )
+
+            self.assertAlmostEqual(float(rows["svm"]["test_accuracy"]), 0.8939)
+            self.assertEqual(rows["svm"]["metrics_path"], "results\\baseline\\svm\\metrics.json")
+            self.assertAlmostEqual(float(rows["proposed"]["test_macro_f1"]), 1.0)
+            self.assertEqual(rows["proposed"]["metrics_path"], "results\\proposed\\8_2\\metrics.json")
+
+    def test_load_reference_clean_rows_from_comparison_summaries_derives_proposed_paths_from_output_dir(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            baseline_summary = tmp / "test_summary.csv"
+            proposed_summary = tmp / "proposed_summary.csv"
+            baseline_summary.write_text("ratio,model,accuracy,macro_f1,weighted_f1,inference_ms,parameter_count,metrics_path\n", encoding="utf-8")
+
+            with proposed_summary.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "ratio",
+                        "output_dir",
+                        "test_accuracy",
+                        "test_macro_f1",
+                        "test_weighted_f1",
+                        "test_inference_ms",
+                        "parameter_count",
+                        "metrics_json",
+                        "selected_ckpt",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "ratio": "8_2",
+                        "output_dir": "results\\proposed\\8_2",
+                        "test_accuracy": "100.00%",
+                        "test_macro_f1": "100.00%",
+                        "test_weighted_f1": "100.00%",
+                        "test_inference_ms": "25.2239",
+                        "parameter_count": "6496573",
+                        "metrics_json": "OK",
+                        "selected_ckpt": "OK",
+                    }
+                )
+
+            rows = snr.load_reference_clean_rows_from_comparison_summaries(
+                baseline_summary_path=baseline_summary,
+                proposed_summary_path=proposed_summary,
+                model_order=["proposed"],
+                data_path=tmp / "clean.npz",
+            )
+
+            self.assertEqual(rows["proposed"]["metrics_path"], "results\\proposed\\8_2\\metrics.json")
+            self.assertTrue(rows["proposed"]["checkpoint_path"].endswith("results\\proposed\\8_2\\selected.ckpt"))
+
+    def test_choose_clean_row_falls_back_to_recomputed_on_mismatch(self) -> None:
+        reference = {
+            "model": "svm",
+            "test_accuracy": 0.8939,
+            "test_macro_f1": 0.5862,
+            "test_weighted_f1": 0.8537,
+            "metrics_path": "reference_metrics.json",
+        }
+        recomputed = {
+            "model": "svm",
+            "test_accuracy": 0.8000,
+            "test_macro_f1": 0.5000,
+            "test_weighted_f1": 0.7000,
+            "metrics_path": "recomputed_metrics.json",
+        }
+
+        chosen = snr.choose_clean_row_for_noise_alignment(reference, recomputed, tolerance=1e-6)
+        self.assertEqual(chosen["metrics_path"], "recomputed_metrics.json")
+        self.assertEqual(chosen["clean_alignment_source"], "recomputed_due_to_mismatch")
+
+    def test_proposed_modality_rows_exclude_clean_and_tag_targets(self) -> None:
+        rows = snr.build_proposed_modality_summary_rows(
+            [
+                {
+                    "model": "proposed",
+                    "snr_db": "40",
+                    "noise_targets": "x_op",
+                    "test_accuracy": 0.9,
+                    "accuracy_drop": 0.1,
+                    "test_macro_f1": 0.8,
+                    "macro_f1_drop": 0.2,
+                    "test_weighted_f1": 0.85,
+                    "weighted_f1_drop": 0.15,
+                    "class0_recall": 0.75,
+                    "test_inference_ms": 12.3,
+                    "metrics_path": "op_40.json",
+                },
+                {
+                    "model": "proposed",
+                    "snr_db": "clean",
+                    "noise_targets": "x_op",
+                    "test_accuracy": 1.0,
+                    "accuracy_drop": 0.0,
+                    "test_macro_f1": 1.0,
+                    "macro_f1_drop": 0.0,
+                    "test_weighted_f1": 1.0,
+                    "weighted_f1_drop": 0.0,
+                    "class0_recall": 1.0,
+                    "test_inference_ms": 12.0,
+                    "metrics_path": "op_clean.json",
+                },
+                {
+                    "model": "proposed",
+                    "snr_db": "35",
+                    "noise_targets": "x_cond",
+                    "test_accuracy": 0.88,
+                    "accuracy_drop": 0.12,
+                    "test_macro_f1": 0.77,
+                    "macro_f1_drop": 0.23,
+                    "test_weighted_f1": 0.83,
+                    "weighted_f1_drop": 0.17,
+                    "class0_recall": 0.7,
+                    "test_inference_ms": 12.5,
+                    "metrics_path": "cond_35.json",
+                },
+            ]
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["noise_targets"] for row in rows], ["x_op", "x_cond"])
+        self.assertEqual([row["snr_db"] for row in rows], ["40", "35"])
+
+    def test_resolve_model_run_settings_reads_current_config(self) -> None:
+        payload = {
+            "proposed": {
+                "config_file": "configs/proposed.yaml",
+                "batch_size": 32,
+                "epochs": 80,
+                "lr": 0.0001,
+            },
+            "baselines": {
+                "svm": {
+                    "C": 0.02,
+                    "max_iter": 5000,
+                },
+                "cnn1d": {
+                    "hidden_dim": 8,
+                    "epochs": 12,
+                    "ratio_overrides": {
+                        "8_2": {
+                            "dropout": 0.55,
+                        }
+                    },
+                },
+            },
+        }
+
+        proposed = snr.resolve_model_run_settings(payload, "proposed", ratio_key="8_2")
+        cnn1d = snr.resolve_model_run_settings(payload, "cnn1d", ratio_key="8_2")
+        svm = snr.resolve_model_run_settings(payload, "svm", ratio_key="8_2")
+
+        self.assertEqual(proposed["config_file"], "configs/proposed.yaml")
+        self.assertEqual(cnn1d["hidden_dim"], 8)
+        self.assertEqual(cnn1d["dropout"], 0.55)
+        self.assertEqual(svm["C"], 0.02)
 
 
 if __name__ == "__main__":

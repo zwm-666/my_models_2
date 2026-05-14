@@ -18,6 +18,13 @@ from typing import Any, Iterable
 
 import numpy as np
 from openpyxl import load_workbook
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import LinearSVC
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +32,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-DEFAULT_MODELS = ["logreg", "random_forest", "mlp", "cnn1d", "transformer", "itransformer", "proposed"]
+CANONICAL_MODEL_ORDER = ["proposed", "logreg", "svm", "random_forest", "mlp", "cnn1d", "lstm", "transformer", "itransformer"]
+DEFAULT_MODELS = ["proposed", "logreg", "svm", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"]
 DEFAULT_SNR_DBS = [40.0, 35.0, 30.0, 25.0, 20.0, 15.0, 10.0]
 SUMMARY_FIELDNAMES = [
     "ratio",
@@ -41,9 +49,6 @@ SUMMARY_FIELDNAMES = [
     "macro_f1_drop",
     "test_weighted_f1",
     "weighted_f1_drop",
-    "class0_precision",
-    "class0_recall",
-    "class0_f1",
     "test_inference_ms",
     "parameter_count",
     "data_path",
@@ -62,6 +67,21 @@ COMPACT_SUMMARY_FIELDNAMES = [
     "data_path",
     "metrics_path",
     "clean_alignment_source",
+]
+EXPORT_FIELDNAMES = [
+    "model",
+    "snr_db",
+    "test_accuracy",
+    "accuracy_drop",
+    "test_macro_f1",
+    "macro_f1_drop",
+    "test_weighted_f1",
+    "weighted_f1_drop",
+    "test_inference_ms",
+    "parameter_count",
+    "data_path",
+    "metrics_path",
+    "alignment_source",
 ]
 MODEL_CATEGORIES = {
     "proposed": "proposed",
@@ -85,6 +105,170 @@ MODEL_DISPLAY_NAMES = {
     "svm": "SVM",
     "lstm": "LSTM",
 }
+
+
+def _resolve_path_string(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw)
+    if path.is_absolute():
+        return str(path)
+    return str((ROOT / path).resolve())
+
+
+def _pct_str_to_float(value: Any) -> float:
+    text = str(value or "").strip()
+    if text.endswith("%"):
+        return float(text[:-1]) / 100.0
+    return _safe_float(text)
+
+
+def load_model_order_from_current_comparison_config(config_path: Path) -> list[str]:
+    payload = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    baselines = payload.get("baselines", {}) if isinstance(payload.get("baselines", {}), dict) else {}
+    excluded = {str(item) for item in payload.get("excluded_models", [])}
+    available = set(baselines.keys())
+    if payload.get("proposed"):
+        available.add("proposed")
+    return [model for model in CANONICAL_MODEL_ORDER if model in available and model not in excluded]
+
+
+def load_current_comparison_config(config_path: Path) -> dict[str, Any]:
+    payload = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"{config_path} 不包含有效 YAML object")
+    return payload
+
+
+def _ratio_override(settings: dict[str, Any], ratio_key: str = "8_2") -> dict[str, Any]:
+    merged = dict(settings)
+    overrides = settings.get("ratio_overrides", {})
+    if isinstance(overrides, dict) and isinstance(overrides.get(ratio_key), dict):
+        merged.update(overrides[ratio_key])
+    merged.pop("ratio_overrides", None)
+    return merged
+
+
+def resolve_model_run_settings(config_payload: dict[str, Any], model_key: str, ratio_key: str = "8_2") -> dict[str, Any]:
+    if model_key == "proposed":
+        settings = config_payload.get("proposed", {})
+    else:
+        settings = (config_payload.get("baselines", {}) or {}).get(model_key, {})
+    if not isinstance(settings, dict):
+        raise KeyError(model_key)
+    return _ratio_override(settings, ratio_key=ratio_key)
+
+
+def load_reference_clean_rows_from_comparison_summaries(
+    *,
+    baseline_summary_path: Path,
+    proposed_summary_path: Path,
+    model_order: list[str],
+    data_path: Path,
+) -> dict[str, dict[str, Any]]:
+    clean_rows: dict[str, dict[str, Any]] = {}
+    baseline_rows = _read_csv_rows(baseline_summary_path)
+    for row in baseline_rows:
+        model_key = str(row.get("model", "")).strip()
+        ratio = str(row.get("ratio", "")).strip()
+        if model_key not in model_order or ratio != "8_2":
+            continue
+        metrics_path = str(row.get("metrics_path", "")).strip()
+        result_dir = str(row.get("result_dir", "")).strip()
+        checkpoint_path = ""
+        if result_dir:
+            result_dir_abs = _resolve_path_string(result_dir)
+            if (Path(result_dir_abs) / "best.ckpt").exists():
+                checkpoint_path = str((Path(result_dir_abs) / "best.ckpt").resolve())
+        clean_rows[model_key] = {
+            "ratio": "8:2",
+            "model": model_key,
+            "category": MODEL_CATEGORIES.get(model_key, ""),
+            "snr_db": "clean",
+            "snr_db_numeric": "",
+            "actual_snr_db_mean": "",
+            "noise_targets": "x_op+x_eis+x_cond",
+            "test_accuracy": _pct_str_to_float(row.get("test_accuracy", row.get("accuracy", ""))),
+            "accuracy_drop": 0.0,
+            "test_macro_f1": _pct_str_to_float(row.get("test_macro_f1", row.get("macro_f1", ""))),
+            "macro_f1_drop": 0.0,
+            "test_weighted_f1": _pct_str_to_float(row.get("test_weighted_f1", row.get("weighted_f1", ""))),
+            "weighted_f1_drop": 0.0,
+            "test_inference_ms": _safe_float(row.get("test_inference_ms", row.get("inference_ms", 0.0))),
+            "parameter_count": int(round(_safe_float(row.get("parameter_count", 0.0)))),
+            "data_path": str(data_path),
+            "metrics_path": metrics_path,
+            "clean_alignment_source": "comparison_summary_reference",
+            "result_dir": _resolve_path_string(result_dir) if result_dir else "",
+            "checkpoint_path": checkpoint_path,
+        }
+
+    with proposed_summary_path.open("r", newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            ratio = str(row.get("ratio", "")).strip()
+            if ratio != "8_2" or "proposed" not in model_order:
+                continue
+            output_dir_raw = str(row.get("output_dir", "")).strip()
+            metrics_path = str(row.get("metrics_json", "")).strip()
+            checkpoint_path = str(row.get("selected_ckpt", "")).strip()
+            if metrics_path.upper() == "OK" and output_dir_raw:
+                metrics_path = str(Path(output_dir_raw) / "metrics.json")
+            if checkpoint_path.upper() == "OK" and output_dir_raw:
+                checkpoint_path = str(Path(output_dir_raw) / "selected.ckpt")
+            clean_rows["proposed"] = {
+                "ratio": "8:2",
+                "model": "proposed",
+                "category": MODEL_CATEGORIES["proposed"],
+                "snr_db": "clean",
+                "snr_db_numeric": "",
+                "actual_snr_db_mean": "",
+                "noise_targets": "x_op+x_eis+x_cond",
+                "test_accuracy": _pct_str_to_float(row.get("test_accuracy", "")),
+                "accuracy_drop": 0.0,
+                "test_macro_f1": _pct_str_to_float(row.get("test_macro_f1", "")),
+                "macro_f1_drop": 0.0,
+                "test_weighted_f1": _pct_str_to_float(row.get("test_weighted_f1", "")),
+                "weighted_f1_drop": 0.0,
+                "test_inference_ms": _safe_float(row.get("test_inference_ms", 0.0)),
+                "parameter_count": int(round(_safe_float(row.get("parameter_count", 0.0)))),
+                "data_path": str(data_path),
+                "metrics_path": metrics_path,
+                "clean_alignment_source": "comparison_summary_reference",
+                "result_dir": _resolve_path_string(output_dir_raw),
+                "checkpoint_path": _resolve_path_string(checkpoint_path),
+            }
+            break
+    return clean_rows
+
+
+def choose_clean_row_for_noise_alignment(
+    reference_row: dict[str, Any],
+    recomputed_row: dict[str, Any],
+    tolerance: float = 1e-9,
+) -> dict[str, Any]:
+    metric_keys = ["test_accuracy", "test_macro_f1", "test_weighted_f1"]
+    is_consistent = all(
+        abs(_safe_float(reference_row.get(key)) - _safe_float(recomputed_row.get(key))) <= float(tolerance)
+        for key in metric_keys
+    )
+    chosen = dict(reference_row if is_consistent else recomputed_row)
+    chosen["clean_alignment_source"] = "comparison_summary_reference_validated" if is_consistent else "recomputed_due_to_mismatch"
+    return chosen
+
+
+def build_proposed_modality_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    single_targets = {"x_op", "x_eis", "x_cond"}
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if str(row.get("model", "")) != "proposed":
+            continue
+        if str(row.get("snr_db", "")).lower() == "clean":
+            continue
+        if str(row.get("noise_targets", "")) not in single_targets:
+            continue
+        filtered.append(dict(row))
+    return filtered
 
 
 def parse_model_path_overrides(items: list[str] | None) -> dict[str, Path]:
@@ -332,9 +516,6 @@ def _row_from_metrics(
         "macro_f1_drop": clean_macro - test_macro,
         "test_weighted_f1": test_weighted,
         "weighted_f1_drop": clean_weighted - test_weighted,
-        "class0_precision": _class0(metrics, "precision"),
-        "class0_recall": _class0(metrics, "recall"),
-        "class0_f1": _class0(metrics, "f1"),
         "test_inference_ms": float(metrics.get("inference_time_per_sample_ms", 0.0)),
         "parameter_count": int(payload.get("parameter_count", clean_row.get("parameter_count", 0) or 0)),
         "data_path": str(data_path),
@@ -365,9 +546,6 @@ def _clean_row_from_metrics(
         "macro_f1_drop": 0.0,
         "test_weighted_f1": float(metrics.get("weighted_f1", 0.0)),
         "weighted_f1_drop": 0.0,
-        "class0_precision": _class0(metrics, "precision"),
-        "class0_recall": _class0(metrics, "recall"),
-        "class0_f1": _class0(metrics, "f1"),
         "test_inference_ms": float(metrics.get("inference_time_per_sample_ms", 0.0)),
         "parameter_count": int(payload.get("parameter_count", 0)),
         "data_path": str(data_path),
@@ -378,6 +556,24 @@ def _clean_row_from_metrics(
 
 def _fmt4(value: Any) -> str:
     return f"{_safe_float(value):.4f}"
+
+
+def export_summary_row(row: dict[str, Any]) -> dict[str, str]:
+    return {
+        "model": str(row.get("model", "")),
+        "snr_db": str(row.get("snr_db", "")),
+        "test_accuracy": _pct(row.get("test_accuracy")),
+        "accuracy_drop": _pct(row.get("accuracy_drop")),
+        "test_macro_f1": _pct(row.get("test_macro_f1")),
+        "macro_f1_drop": _pct(row.get("macro_f1_drop")),
+        "test_weighted_f1": _pct(row.get("test_weighted_f1")),
+        "weighted_f1_drop": _pct(row.get("weighted_f1_drop")),
+        "test_inference_ms": _fmt4(row.get("test_inference_ms")),
+        "parameter_count": str(int(round(_safe_float(row.get("parameter_count", 0.0))))),
+        "data_path": str(row.get("data_path", "")),
+        "metrics_path": str(row.get("metrics_path", "")),
+        "alignment_source": str(row.get("clean_alignment_source", row.get("alignment_source", ""))),
+    }
 
 
 def compact_summary_row(row: dict[str, Any]) -> dict[str, str]:
@@ -398,6 +594,10 @@ def compact_summary_row(row: dict[str, Any]) -> dict[str, str]:
 
 def write_compact_summary(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     _write_csv_rows(path, (compact_summary_row(row) for row in rows), COMPACT_SUMMARY_FIELDNAMES)
+
+
+def write_export_summary(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    _write_csv_rows(path, (export_summary_row(row) for row in rows), EXPORT_FIELDNAMES)
 
 
 def merge_clean_rows_with_noise_rows(
@@ -461,7 +661,6 @@ def summary_row_to_workbook_values(row: dict[str, Any]) -> list[Any]:
         _pct(row.get("test_macro_f1")),
         _pct(row.get("macro_f1_drop")),
         _pct(row.get("test_weighted_f1")),
-        _pct(row.get("class0_recall")),
         _fmt_ms(row.get("test_inference_ms")),
     ]
 
@@ -470,7 +669,7 @@ def update_workbook_snr_sheet(workbook_path: Path, rows: list[dict[str, Any]], s
     workbook = load_workbook(workbook_path)
     if sheet_name not in workbook.sheetnames:
         worksheet = workbook.create_sheet(sheet_name)
-        worksheet.append(["模型", "SNR(dB)", "Accuracy", "Acc下降", "Macro-F1", "Macro下降", "Weighted-F1", "第0类 Recall", "推理时间(ms/sample)"])
+        worksheet.append(["模型", "SNR(dB)", "Accuracy", "Acc下降", "Macro-F1", "Macro下降", "Weighted-F1", "推理时间(ms/sample)"])
     else:
         worksheet = workbook[sheet_name]
     if worksheet.max_row > 1:
@@ -483,7 +682,8 @@ def update_workbook_snr_sheet(workbook_path: Path, rows: list[dict[str, Any]], s
 def _copy_clean_rows_to_metrics(output_root: Path, clean_rows: list[dict[str, Any]]) -> None:
     for row in clean_rows:
         model = str(row.get("model"))
-        source = Path(str(row.get("metrics_path", "")))
+        source_raw = str(row.get("metrics_path", ""))
+        source = Path(_resolve_path_string(source_raw)) if source_raw else Path()
         if not source.exists():
             continue
         clean_dir = output_root / model / "clean"
@@ -493,11 +693,98 @@ def _copy_clean_rows_to_metrics(output_root: Path, clean_rows: list[dict[str, An
             shutil.copy2(source, target)
 
 
+def _flatten_split_for_model(npz_path: Path, split_value: int, model_key: str) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    data = np.load(npz_path)
+    split = np.asarray(data["split"], dtype=np.int64)
+    indices = np.where(split == int(split_value))[0]
+    cond_key = "x_cond" if "x_cond" in data else "cond"
+    label_key = "labels" if "labels" in data else "y"
+    x_op = np.asarray(data["x_op"][indices], dtype=np.float32)
+    x_eis = np.asarray(data["x_eis"][indices], dtype=np.float32)
+    x_cond = np.asarray(data[cond_key][indices], dtype=np.float32)
+    if model_key == "logreg":
+        features = x_op.reshape(len(indices), -1)
+    else:
+        features = np.concatenate(
+            [
+                x_op.reshape(len(indices), -1),
+                x_eis.reshape(len(indices), -1),
+                x_cond.reshape(len(indices), -1),
+            ],
+            axis=1,
+        )
+    labels = np.asarray(data[label_key][indices], dtype=np.int64)
+    return features, labels
+
+
+def _build_ml_model_from_settings(model_key: str, settings: dict[str, Any]) -> Any:
+    if model_key == "logreg":
+        return make_pipeline(
+            StandardScaler(),
+            PCA(n_components=1),
+            LogisticRegression(
+                C=float(settings.get("C", 1.0)),
+                max_iter=int(settings.get("max_iter", 1000)),
+                class_weight=None,
+                random_state=int(settings.get("random_state", 44)),
+            ),
+        )
+    if model_key == "svm":
+        return make_pipeline(
+            StandardScaler(),
+            PCA(n_components=1),
+            LinearSVC(
+                C=float(settings.get("C", 1.0)),
+                max_iter=int(settings.get("max_iter", 5000)),
+                class_weight=None,
+                random_state=int(settings.get("random_state", 44)),
+            ),
+        )
+    if model_key == "random_forest":
+        return make_pipeline(
+            StandardScaler(),
+            PCA(n_components=1),
+            RandomForestClassifier(
+                n_estimators=int(settings.get("n_estimators", 40)),
+                max_depth=None if settings.get("max_depth") in (None, "", "None") else int(settings.get("max_depth")),
+                min_samples_leaf=int(settings.get("min_samples_leaf", 1)),
+                max_features=settings.get("max_features", "sqrt"),
+                class_weight=None,
+                random_state=int(settings.get("random_state", 44)),
+                n_jobs=-1,
+            ),
+        )
+    raise KeyError(model_key)
+
+
+def _resolve_checkpoint_from_clean_row(clean_row: dict[str, Any]) -> Path | None:
+    checkpoint_raw = str(clean_row.get("checkpoint_path", "")).strip()
+    if checkpoint_raw:
+        checkpoint_path = Path(_resolve_path_string(checkpoint_raw))
+        if checkpoint_path.exists():
+            return checkpoint_path
+    result_dir_raw = str(clean_row.get("result_dir", "")).strip()
+    if result_dir_raw:
+        result_dir = Path(_resolve_path_string(result_dir_raw))
+        for candidate_name in ("selected.ckpt", "best.ckpt", "best_val.ckpt"):
+            candidate = result_dir / candidate_name
+            if candidate.exists():
+                return candidate
+    metrics_path_raw = str(clean_row.get("metrics_path", "")).strip()
+    if metrics_path_raw:
+        metrics_parent = Path(_resolve_path_string(metrics_path_raw)).parent
+        for candidate_name in ("selected.ckpt", "best.ckpt", "best_val.ckpt"):
+            candidate = metrics_parent / candidate_name
+            if candidate.exists():
+                return candidate
+    return None
+
+
 def _train_and_evaluate(
     args: argparse.Namespace,
     noisy_npzs: dict[str, tuple[Path, dict[str, Any]]],
     clean_by_model: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[dict[str, Any]]]:
     from scripts import run_official_baseline_experiments as baseline
     import torch
     from torch.utils.data import DataLoader
@@ -507,10 +794,12 @@ def _train_and_evaluate(
     output_root = ROOT / args.output_root
     clean_npz = ROOT / args.clean_npz
     clean_eval_npz = ROOT / args.data_root / "clean.npz"
-    reuse_torch_clean_dirs = parse_model_path_overrides(getattr(args, "reuse_torch_clean_dir", None))
+    data_root = ROOT / args.data_root
+    comparison_config = getattr(args, "_comparison_config", load_current_comparison_config(ROOT / args.comparison_config))
+    ratio_key = "8_2"
     noise_rows: list[dict[str, Any]] = []
+    modality_rows: list[dict[str, Any]] = []
     fresh_clean_by_model: dict[str, dict[str, Any]] = dict(clean_by_model)
-    preserve_reference_clean_models = set(clean_by_model)
     ml_models = {"logreg", "svm", "random_forest"}
     torch_models = {"mlp", "cnn1d", "lstm", "transformer", "itransformer"}
 
@@ -521,12 +810,13 @@ def _train_and_evaluate(
     for model_key in args.models:
         print(f"\n=== 准备模型: {model_key} ===", flush=True)
         if model_key in ml_models:
-            x_train, y_train = baseline._flatten_split(clean_npz, split_value=0)
-            model = baseline._build_ml_model(model_key, seed=int(args.seed), rf_estimators=int(args.rf_estimators))
+            settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
+            x_train, y_train = _flatten_split_for_model(clean_npz, split_value=0, model_key=model_key)
+            model = _build_ml_model_from_settings(model_key, settings)
             model.fit(x_train, y_train)
             trained_models[model_key] = model
-            x_val, y_val = baseline._flatten_split(clean_npz, split_value=1)
-            x_test, y_test = baseline._flatten_split(clean_npz, split_value=2)
+            x_val, y_val = _flatten_split_for_model(clean_npz, split_value=1, model_key=model_key)
+            x_test, y_test = _flatten_split_for_model(clean_eval_npz, split_value=2, model_key=model_key)
             import time
 
             start = time.perf_counter()
@@ -544,59 +834,67 @@ def _train_and_evaluate(
                 baseline._ml_parameter_count(model),
                 extra_payload={"clean_recomputed_for_snr_alignment": True},
             )
-            if model_key not in preserve_reference_clean_models:
-                fresh_clean_by_model[model_key] = _clean_row_from_metrics(
-                    model_key,
-                    clean_metrics_path,
-                    clean_eval_npz,
-                    clean_alignment_source=str(clean_metrics_path),
+            recomputed_clean_row = _clean_row_from_metrics(
+                model_key,
+                clean_metrics_path,
+                clean_eval_npz,
+                clean_alignment_source=str(clean_metrics_path),
+            )
+            if model_key in clean_by_model:
+                fresh_clean_by_model[model_key] = choose_clean_row_for_noise_alignment(
+                    clean_by_model[model_key],
+                    recomputed_clean_row,
+                    tolerance=float(args.clean_consistency_tolerance),
                 )
+            else:
+                fresh_clean_by_model[model_key] = recomputed_clean_row
         elif model_key in torch_models:
+            settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
             train_ds = baseline.BaselineNPZDataset(clean_npz, split_value=0)
             num_classes = baseline._num_classes(clean_npz)
-            if model_key in reuse_torch_clean_dirs:
-                metrics_path, checkpoint_path = resolve_reuse_clean_artifacts(model_key, reuse_torch_clean_dirs[model_key])
-            else:
+            checkpoint_path = _resolve_checkpoint_from_clean_row(clean_by_model.get(model_key, {}))
+            if checkpoint_path is None:
                 train_dir = output_root / "_trained_clean" / model_key
                 metrics_path = baseline.run_torch_baseline(
                     model_key=model_key,
                     npz_path=clean_npz,
                     output_dir=train_dir,
-                    epochs=int(args.epochs),
-                    patience=int(args.patience),
+                    epochs=int(settings.get("epochs", args.epochs)),
+                    patience=int(settings.get("patience", args.patience)),
                     min_delta=float(args.min_delta),
-                    batch_size=int(args.batch_size),
-                    lr=float(args.lr),
-                    weight_decay=float(args.weight_decay),
+                    batch_size=int(settings.get("batch_size", args.batch_size)),
+                    lr=float(settings.get("lr", args.lr)),
+                    weight_decay=float(settings.get("weight_decay", args.weight_decay)),
                     seed=int(args.seed),
-                    hidden_dim=int(args.hidden_dim),
-                    d_model=int(args.d_model),
-                    num_layers=int(args.num_layers),
-                    dropout=float(args.dropout),
+                    hidden_dim=int(settings.get("hidden_dim", args.hidden_dim)),
+                    d_model=int(settings.get("d_model", args.d_model)),
+                    num_layers=int(settings.get("num_layers", args.num_layers)),
+                    dropout=float(settings.get("dropout", args.dropout)),
                     refit_trainval=bool(args.refit_trainval),
-                    min_epochs_before_stop=int(args.min_epochs_before_stop),
-                    val_metric_smoothing=int(args.val_metric_smoothing),
-                    class_weighting=str(args.class_weighting),
+                    min_epochs_before_stop=int(settings.get("min_epochs_before_stop", args.min_epochs_before_stop)),
+                    val_metric_smoothing=int(settings.get("val_metric_smoothing", args.val_metric_smoothing)),
+                    class_weighting=str(settings.get("class_weighting", args.class_weighting)),
                 )
                 checkpoint_path = output_root / "_trained_clean" / model_key / "best.ckpt"
-            torch_checkpoints[model_key] = (checkpoint_path, (train_ds, num_classes, metrics_path))
-            if model_key not in preserve_reference_clean_models or model_key in reuse_torch_clean_dirs:
+            torch_checkpoints[model_key] = (checkpoint_path, (train_ds, num_classes, settings))
+            if model_key not in clean_by_model:
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 model = baseline._build_torch_model(
                     model_key,
                     train_ds,
                     num_classes,
-                    int(args.hidden_dim),
-                    int(args.d_model),
-                    int(args.num_layers),
-                    float(args.dropout),
+                    int(settings.get("hidden_dim", args.hidden_dim)),
+                    int(settings.get("d_model", args.d_model)),
+                    int(settings.get("num_layers", args.num_layers)),
+                    float(settings.get("dropout", args.dropout)),
                 ).to(device)
                 checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
                 model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
                 val_ds = baseline.BaselineNPZDataset(clean_npz, split_value=1)
                 test_ds = baseline.BaselineNPZDataset(clean_eval_npz, split_value=2)
-                val_loader = DataLoader(val_ds, batch_size=int(args.batch_size), shuffle=False)
-                test_loader = DataLoader(test_ds, batch_size=int(args.batch_size), shuffle=False)
+                batch_size = int(settings.get("batch_size", args.batch_size))
+                val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+                test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
                 val_metrics = baseline._evaluate_torch_model(model, val_loader, device, num_classes)
                 test_metrics = baseline._evaluate_torch_model(model, test_loader, device, num_classes)
                 clean_metrics_path = baseline._save_result(
@@ -616,31 +914,34 @@ def _train_and_evaluate(
                     clean_alignment_source=str(checkpoint_path),
                 )
         elif model_key == "proposed":
-            train_dir = output_root / "_trained_clean" / model_key
-            metrics_path = baseline.run_proposed_model(
-                npz_path=clean_npz,
-                output_dir=train_dir,
-                config_path=ROOT / args.proposed_config,
-                epochs=int(args.proposed_epochs),
-                patience=int(args.patience),
-                min_delta=float(args.min_delta),
-                batch_size=int(args.batch_size),
-                refit_trainval=bool(args.refit_trainval),
-                min_epochs_before_stop=int(args.min_epochs_before_stop),
-                val_metric_smoothing=int(args.val_metric_smoothing),
-                class_weighting=str(args.class_weighting),
-                seed=int(args.seed),
-                lr=float(args.proposed_lr),
-                weight_decay=float(args.proposed_weight_decay),
-                checkpoint_selection=str(args.checkpoint_selection),
-                selection_score=str(args.selection_score),
-                init_checkpoint=args.init_checkpoint,
-            )
-            proposed_checkpoint = train_dir / "best.ckpt"
-            if model_key not in preserve_reference_clean_models:
+            settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
+            proposed_checkpoint = _resolve_checkpoint_from_clean_row(clean_by_model.get(model_key, {}))
+            if proposed_checkpoint is None:
+                train_dir = output_root / "_trained_clean" / model_key
+                baseline.run_proposed_model(
+                    npz_path=clean_npz,
+                    output_dir=train_dir,
+                    config_path=ROOT / str(settings.get("config_file", args.proposed_config)),
+                    epochs=int(settings.get("epochs", args.proposed_epochs)),
+                    patience=int(settings.get("patience", args.patience)),
+                    min_delta=float(args.min_delta),
+                    batch_size=int(settings.get("batch_size", args.batch_size)),
+                    refit_trainval=bool(args.refit_trainval),
+                    min_epochs_before_stop=int(settings.get("min_epochs_before_stop", args.min_epochs_before_stop)),
+                    val_metric_smoothing=int(settings.get("val_metric_smoothing", args.val_metric_smoothing)),
+                    class_weighting=str(settings.get("class_weighting_default", args.class_weighting)),
+                    seed=int(args.seed),
+                    lr=float(settings.get("lr", args.proposed_lr)),
+                    weight_decay=float(settings.get("weight_decay", args.proposed_weight_decay)),
+                    checkpoint_selection=str(settings.get("checkpoint_selection", args.checkpoint_selection)),
+                    selection_score=str(settings.get("selection_score_default", args.selection_score)),
+                    init_checkpoint=args.init_checkpoint,
+                )
+                proposed_checkpoint = train_dir / "best.ckpt"
+            if model_key not in clean_by_model:
                 clean_dir = output_root / model_key / "clean"
                 proposed_eval.run_evaluation(
-                    config_path=str(ROOT / args.proposed_config),
+                    config_path=str(ROOT / str(settings.get("config_file", args.proposed_config))),
                     data_path=str(clean_eval_npz),
                     checkpoint_path=str(proposed_checkpoint),
                     output_dir=str(clean_dir),
@@ -667,8 +968,8 @@ def _train_and_evaluate(
             if model_key in ml_models:
                 model = trained_models[model_key]
                 num_classes = baseline._num_classes(clean_npz)
-                x_val, y_val = baseline._flatten_split(clean_npz, split_value=1)
-                x_test, y_test = baseline._flatten_split(npz_path, split_value=2)
+                x_val, y_val = _flatten_split_for_model(clean_npz, split_value=1, model_key=model_key)
+                x_test, y_test = _flatten_split_for_model(npz_path, split_value=2, model_key=model_key)
                 import time
 
                 start = time.perf_counter()
@@ -688,23 +989,24 @@ def _train_and_evaluate(
                 )
                 clean_source = str(clean_row.get("metrics_path", ""))
             elif model_key in torch_models:
-                checkpoint_path, (train_ds, num_classes, _) = torch_checkpoints[model_key]
+                checkpoint_path, (train_ds, num_classes, settings) = torch_checkpoints[model_key]
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 model = baseline._build_torch_model(
                     model_key,
                     train_ds,
                     num_classes,
-                    int(args.hidden_dim),
-                    int(args.d_model),
-                    int(args.num_layers),
-                    float(args.dropout),
+                    int(settings.get("hidden_dim", args.hidden_dim)),
+                    int(settings.get("d_model", args.d_model)),
+                    int(settings.get("num_layers", args.num_layers)),
+                    float(settings.get("dropout", args.dropout)),
                 ).to(device)
                 checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
                 model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
                 val_ds = baseline.BaselineNPZDataset(clean_npz, split_value=1)
                 test_ds = baseline.BaselineNPZDataset(npz_path, split_value=2)
-                val_loader = DataLoader(val_ds, batch_size=int(args.batch_size), shuffle=False)
-                test_loader = DataLoader(test_ds, batch_size=int(args.batch_size), shuffle=False)
+                batch_size = int(settings.get("batch_size", args.batch_size))
+                val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+                test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
                 val_metrics = baseline._evaluate_torch_model(model, val_loader, device, num_classes)
                 test_metrics = baseline._evaluate_torch_model(model, test_loader, device, num_classes)
                 param_count = int(sum(parameter.numel() for parameter in model.parameters()))
@@ -719,8 +1021,9 @@ def _train_and_evaluate(
             else:
                 if proposed_checkpoint is None:
                     raise RuntimeError("proposed checkpoint was not trained")
+                settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
                 proposed_eval.run_evaluation(
-                    config_path=str(ROOT / args.proposed_config),
+                    config_path=str(ROOT / str(settings.get("config_file", args.proposed_config))),
                     data_path=str(npz_path),
                     checkpoint_path=str(proposed_checkpoint),
                     output_dir=str(eval_dir),
@@ -741,18 +1044,57 @@ def _train_and_evaluate(
                     clean_alignment_source=clean_source,
                 )
             )
-    return noise_rows, fresh_clean_by_model
+    if proposed_checkpoint is not None and "proposed" in fresh_clean_by_model:
+        proposed_clean_row = fresh_clean_by_model["proposed"]
+        proposed_settings = resolve_model_run_settings(comparison_config, "proposed", ratio_key=ratio_key)
+        for modality_target in ["x_op", "x_eis", "x_cond"]:
+            for snr_db in args.snr_dbs:
+                label = _snr_token(snr_db)
+                modality_npz = data_root / "proposed_modality" / modality_target / f"snr_{label}dB.npz"
+                noise_summary = write_test_subset_with_snr_noise(
+                    clean_npz,
+                    modality_npz,
+                    snr_db=float(snr_db),
+                    noise_targets=[modality_target],
+                    seed=noise_seed_for_snr(int(args.seed), float(snr_db)) + len(modality_target),
+                )
+                eval_dir = output_root / "proposed" / f"{modality_target}_snr_{label}dB"
+                proposed_eval.run_evaluation(
+                    config_path=str(ROOT / str(proposed_settings.get("config_file", args.proposed_config))),
+                    data_path=str(modality_npz),
+                    checkpoint_path=str(proposed_checkpoint),
+                    output_dir=str(eval_dir),
+                    strict=False,
+                    split="test",
+                )
+                modality_rows.append(
+                    _row_from_metrics(
+                        model_key="proposed",
+                        snr_db=float(snr_db),
+                        actual_snr_db_mean=float(noise_summary["actual_snr_db_mean"]),
+                        noise_targets=[modality_target],
+                        data_path=modality_npz,
+                        metrics_path=eval_dir / "metrics.json",
+                        clean_row=proposed_clean_row,
+                        clean_alignment_source=str(proposed_checkpoint),
+                    )
+                )
+    return noise_rows, fresh_clean_by_model, modality_rows
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="重新生成 SNR 噪声测试结果，并替换总表中的旧噪声结果")
-    parser.add_argument("--clean-npz", default="data/processed/codex_baseline_selected_self_seed44_8_2/self_seed44_8_2.npz")
-    parser.add_argument("--reference-clean-summary", default="results/codex_baseline_selected_self_seed44_8_2/test_summary.csv")
-    parser.add_argument("--old-summary", default="results/codex_snr_noise_baselines_proposed_seed44_8_2/summary.csv")
-    parser.add_argument("--output-root", default="results/codex_snr_noise_baselines_proposed_seed44_8_2")
-    parser.add_argument("--data-root", default="data/processed/codex_snr_noise_baselines_proposed_seed44_8_2")
+    parser.add_argument("--clean-npz", default="data/processed/self_seed44_8_2.npz")
+    parser.add_argument("--comparison-config", default="configs/current_comparison_models.yaml")
+    parser.add_argument("--baseline-clean-summary", default="results/updated_dataset_baseline_ratio_comparison_20260513_seed44/test_summary.csv")
+    parser.add_argument("--proposed-clean-summary", default="results/updated_dataset_proposed_ratio_comparison_20260513_seed44/proposed_summary.csv")
+    parser.add_argument("--reference-clean-summary", default="results/updated_dataset_baseline_ratio_comparison_20260513_seed44/test_summary.csv")
+    parser.add_argument("--old-summary", default="results/current_snr_noise_8_2_seed44_artifacts/summary.csv")
+    parser.add_argument("--summary-path", default="results\\噪声对齐论文实验新表.csv")
+    parser.add_argument("--output-root", default="results/current_snr_noise_8_2_seed44_artifacts")
+    parser.add_argument("--data-root", default="data/processed/current_snr_noise_8_2_seed44_artifacts")
     parser.add_argument("--workbook", default="outputs/results_summary/CAPT-UniShape_实验结果总表_含自测公开训练结果汇总.xlsx")
-    parser.add_argument("--clean-source", choices=["same-run", "reference"], default="same-run", help="same-run：默认同次训练/同一checkpoint评估clean和噪声；reference：显式复用旧clean行")
+    parser.add_argument("--clean-source", choices=["same-run", "reference"], default="reference", help="same-run：默认同次训练/同一checkpoint评估clean和噪声；reference：显式复用对比实验 clean 行")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=list(MODEL_CATEGORIES.keys()))
     parser.add_argument("--snr-dbs", nargs="+", type=float, default=DEFAULT_SNR_DBS)
     parser.add_argument("--noise-targets", nargs="+", default=["x_op", "x_eis", "x_cond"], choices=["x_op", "x_eis", "x_cond"])
@@ -780,7 +1122,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--selection-score", choices=["macro_f1", "macro_f1_class0_recall", "macro_f1_gap_penalty", "val_train_holdout_macro_f1"], default="macro_f1")
     parser.add_argument("--init-checkpoint", default=None)
     parser.add_argument("--reuse-torch-clean-dir", nargs="+", default=[], help="复用已有深度学习 clean 模型目录，格式 model=dir；目录下需包含 metrics.json 和 best.ckpt")
+    parser.add_argument("--clean-consistency-tolerance", type=float, default=1e-9)
     parser.add_argument("--write-paper-table", action="store_true", help="额外输出 paper_snr_noise_table.md；默认只写 summary.csv")
+    parser.add_argument("--write-proposed-modality-summary", action=argparse.BooleanOptionalAction, default=True, help="输出 proposed 单模态噪声副表")
+    parser.add_argument("--clear-previous-results", action=argparse.BooleanOptionalAction, default=True, help="运行前清理旧的噪声实验中间产物和主表")
     parser.add_argument("--skip-workbook", action="store_true")
     return parser.parse_args(argv)
 
@@ -791,19 +1136,33 @@ def main(argv: list[str] | None = None) -> None:
     data_root = ROOT / args.data_root
     clean_npz = ROOT / args.clean_npz
     old_summary_path = ROOT / args.old_summary
-    summary_path = output_root / "summary.csv"
+    summary_path = ROOT / args.summary_path
+    compact_summary_path = output_root / "summary.csv"
+    modality_summary_path = output_root / "proposed_modality_summary.csv"
+    args._comparison_config = load_current_comparison_config(ROOT / args.comparison_config)
+    available_models = load_model_order_from_current_comparison_config(ROOT / args.comparison_config)
+    args.models = [model for model in args.models if model in available_models]
+    if bool(args.clear_previous_results):
+        if summary_path.exists():
+            summary_path.unlink()
+        if output_root.exists():
+            shutil.rmtree(output_root)
+        if data_root.exists():
+            shutil.rmtree(data_root)
     output_root.mkdir(parents=True, exist_ok=True)
     data_root.mkdir(parents=True, exist_ok=True)
 
-    old_rows = _read_csv_rows(old_summary_path) if args.clean_source == "reference" else []
+    old_rows = _read_csv_rows(old_summary_path) if old_summary_path.exists() else []
     clean_subset_summary = write_clean_test_subset(clean_npz, data_root / "clean.npz")
     clean_eval_npz = data_root / "clean.npz"
     clean_by_model: dict[str, dict[str, Any]] = {}
     if args.clean_source == "reference":
-        clean_rows = [row for row in old_rows if str(row.get("snr_db", "")).lower() == "clean" and row.get("model") in args.models]
-        clean_by_model = {row["model"]: row for row in clean_rows}
-        reference_clean_by_model = load_reference_clean_rows(ROOT / args.reference_clean_summary, list(args.models), clean_eval_npz)
-        clean_by_model.update(reference_clean_by_model)
+        clean_by_model = load_reference_clean_rows_from_comparison_summaries(
+            baseline_summary_path=ROOT / args.baseline_clean_summary,
+            proposed_summary_path=ROOT / args.proposed_clean_summary,
+            model_order=list(args.models),
+            data_path=clean_eval_npz,
+        )
         _copy_clean_rows_to_metrics(output_root, list(clean_by_model.values()))
 
     noisy_npzs: dict[str, tuple[Path, dict[str, Any]]] = {}
@@ -833,7 +1192,7 @@ def main(argv: list[str] | None = None) -> None:
         noisy_npzs[label] = (noisy_path, noise_summary)
     (output_root / "protocol.json").write_text(json.dumps(protocol, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    noise_rows, fresh_clean_by_model = _train_and_evaluate(args, noisy_npzs, clean_by_model)
+    noise_rows, fresh_clean_by_model, modality_rows = _train_and_evaluate(args, noisy_npzs, clean_by_model)
     missing_clean = [model for model in args.models if model not in fresh_clean_by_model]
     if missing_clean:
         raise ValueError(f"本次 SNR 汇总缺少同次 clean 行: {missing_clean}")
@@ -843,22 +1202,19 @@ def main(argv: list[str] | None = None) -> None:
         model_order=list(args.models),
         snr_order=["clean"] + [_snr_token(value) for value in args.snr_dbs],
     )
-    merged_model_order = [model for model in DEFAULT_MODELS if model in set(args.models) or any(row.get("model") == model for row in old_rows)]
-    if not merged_model_order:
-        merged_model_order = list(args.models)
-    merged_rows = merge_updated_rows_with_existing_rows(
-        existing_rows=old_rows,
-        updated_rows=updated_rows,
-        model_order=merged_model_order,
-        snr_order=["clean"] + [_snr_token(value) for value in args.snr_dbs],
-    )
-    write_compact_summary(summary_path, merged_rows)
+    write_export_summary(summary_path, updated_rows)
+    write_compact_summary(compact_summary_path, updated_rows)
     paper_path = output_root / "paper_snr_noise_table.md"
+    if bool(args.write_proposed_modality_summary):
+        _write_csv_rows(modality_summary_path, build_proposed_modality_summary_rows(modality_rows), SUMMARY_FIELDNAMES)
     if bool(args.write_paper_table):
-        write_paper_table(paper_path, merged_rows, summary_path)
+        write_paper_table(paper_path, updated_rows, summary_path)
     if not bool(args.skip_workbook):
-        update_workbook_snr_sheet(ROOT / args.workbook, merged_rows)
+        update_workbook_snr_sheet(ROOT / args.workbook, updated_rows)
     print(f"\n已写入 SNR 噪声汇总: {summary_path}", flush=True)
+    print(f"已写入紧凑汇总: {compact_summary_path}", flush=True)
+    if bool(args.write_proposed_modality_summary):
+        print(f"已写入 proposed 单模态副表: {modality_summary_path}", flush=True)
     if bool(args.write_paper_table):
         print(f"已更新论文表: {paper_path}", flush=True)
     if not bool(args.skip_workbook):
@@ -869,10 +1225,10 @@ def write_paper_table(path: Path, rows: list[dict[str, Any]], summary_path: Path
     lines = [
         "# SNR 噪声鲁棒性基线对比",
         "",
-        "协议：原工作簿无噪声结果表不改动；本 SNR 对比表的 clean 行使用同次训练模型在干净测试集上的指标，噪声行仅对测试集 `x_op+x_eis+x_cond` 按目标 SNR 加高斯噪声后重新测试。",
+        "协议：clean 行直接引用 8:2 对比实验结论；噪声行仅对测试集 `x_op+x_eis+x_cond` 按目标 SNR 加高斯噪声后重新测试。",
         "",
-        "| 模型 | SNR(dB) | Accuracy | Acc下降 | Macro-F1 | Macro下降 | Weighted-F1 | 第0类 Recall | 推理时间(ms/sample) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| 模型 | SNR(dB) | Accuracy | Acc下降 | Macro-F1 | Macro下降 | Weighted-F1 | 推理时间(ms/sample) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         values = summary_row_to_workbook_values(row)

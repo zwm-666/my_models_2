@@ -49,6 +49,37 @@ _derive_segment_group_keys = _self_dataset._derive_segment_group_keys
 _group_split = _self_dataset._group_split
 build_self_datasets = _self_dataset.build_self_datasets
 
+LABEL_ALIASES: list[str] = [LABEL_COL, "label", "Label", "标签"]
+STRING_LABEL_MAP: dict[str, int] = {
+    "正常": 0,
+    "过湿": 1,
+    "水淹": 1,
+    "过干": 2,
+    "膜干": 2,
+}
+
+
+def _prepare_label_column(frame: pd.DataFrame) -> tuple[pd.DataFrame, str, dict[str, int]]:
+    """Return a frame with the canonical numeric LABEL_COL.
+
+    The project class order is 0=正常, 1=过湿/水淹, 2=过干/膜干.
+    """
+    source_col = next((col for col in LABEL_ALIASES if col in frame.columns), None)
+    if source_col is None:
+        raise ValueError(f"Missing label column. Expected one of: {LABEL_ALIASES}")
+    prepared = frame.copy()
+    if source_col != LABEL_COL:
+        prepared[LABEL_COL] = prepared[source_col]
+    if prepared[LABEL_COL].dtype == object:
+        values = prepared[LABEL_COL].astype(str).str.strip()
+        unmapped = set(values.unique()) - set(STRING_LABEL_MAP.keys())
+        if unmapped:
+            raise ValueError(f"Unknown labels: {sorted(unmapped)}. Expected: {list(STRING_LABEL_MAP.keys())}")
+        prepared[LABEL_COL] = values.map(STRING_LABEL_MAP).astype(int)
+    else:
+        prepared[LABEL_COL] = prepared[LABEL_COL].astype(int)
+    return prepared, str(source_col), dict(STRING_LABEL_MAP)
+
 
 def _dataset_arrays(dataset: Any) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any]]:
     x_op = dataset.x_op.detach().cpu().numpy().astype(np.float32)
@@ -392,18 +423,12 @@ def _build_stack_windows(
     prefer_balanced_train_groups: bool,
 ) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], dict[str, object]]:
     df = pd.read_excel(Path(excel_path), sheet_name=sheet_name, engine="openpyxl")
+    df, label_source_col, label_value_map = _prepare_label_column(df)
     expected = set(STACK_COLS + COND_COLS + EIS_COLS + [TIME_COL, LABEL_COL])
     missing = expected - set(df.columns)
     if missing:
         raise ValueError(f"Missing expected columns in Excel: {sorted(missing)}")
     df = df.copy()
-    # Encode string labels to integers: 正常=0, 过干=1, 过湿=2
-    label_map = {"正常": 0, "过干": 1, "过湿": 2}
-    if df[LABEL_COL].dtype == object:
-        unmapped = set(df[LABEL_COL].unique()) - set(label_map.keys())
-        if unmapped:
-            raise ValueError(f"Unknown labels: {unmapped}. Expected: {list(label_map.keys())}")
-        df[LABEL_COL] = df[LABEL_COL].map(label_map).astype(int)
     if split_mode == "segment":
         df["__group_key__"] = _derive_segment_group_keys(
             df,
@@ -536,6 +561,8 @@ def _build_stack_windows(
         "train_stride_by_label": {str(label): int(stride) for label, stride in train_stride_by_label.items()},
         "op_cols": STACK_COLS,
         "cond_cols": COND_COLS,
+        "label_source_col": label_source_col,
+        "label_value_map": label_value_map,
         "test_size_ratio": test_size,
         "val_size_ratio_within_train_pool": val_size,
         "group_split_strategy": group_split_strategy,
