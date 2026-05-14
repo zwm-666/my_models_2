@@ -113,6 +113,24 @@ class AblationSwitchTests(unittest.TestCase):
 
         self.assertEqual(args.data, "data/processed/self_seed44_8_2.npz")
 
+    def test_snr_eval_args_default_to_current_six_four_artifacts(self) -> None:
+        from scripts.run_official_ablation_experiments import parse_args
+
+        args = parse_args(["--snr-eval-only"])
+
+        self.assertTrue(args.snr_eval_only)
+        self.assertEqual(args.reuse_checkpoints_root, "results/current_ablation_updated_dataset_seed44_6_4")
+        self.assertEqual(args.snr_output_root, "results/current_ablation_snr_updated_dataset_seed44_6_4")
+        self.assertEqual(args.snr_dbs, [40.0, 30.0, 25.0, 20.0])
+
+    def test_snr_noise_targets_skip_zeroed_ablation_inputs(self) -> None:
+        from scripts.run_official_ablation_experiments import ABLATIONS, _active_noise_targets
+
+        requested = ["x_op", "x_eis", "x_cond"]
+
+        self.assertEqual(_active_noise_targets(ABLATIONS["full_rbf"], requested), requested)
+        self.assertEqual(_active_noise_targets(ABLATIONS["no_condition_input"], requested), ["x_op", "x_eis"])
+
     def test_fixed_equal_fusion_replaces_condition_gates(self) -> None:
         from models.capt_unishape_kanfusion_no_rbf import OfficialCAPTUniShapeKANFusionNoRBF
 

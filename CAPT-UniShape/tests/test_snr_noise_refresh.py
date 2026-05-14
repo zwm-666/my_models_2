@@ -6,6 +6,10 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from openpyxl import Workbook, load_workbook
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
 
 from scripts import refresh_snr_noise_results as snr
 
@@ -377,6 +381,45 @@ class SnrNoiseRefreshTests(unittest.TestCase):
             ],
         )
 
+    def test_update_workbook_snr_sheet_uses_times_new_roman_font(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "snr.xlsx"
+            workbook = Workbook()
+            workbook.active.title = "Sheet1"
+            workbook.save(workbook_path)
+            workbook.close()
+
+            snr.update_workbook_snr_sheet(
+                workbook_path,
+                [
+                    {
+                        "model": "proposed",
+                        "snr_db": "40",
+                        "test_accuracy": 1.0,
+                        "accuracy_drop": 0.0,
+                        "test_macro_f1": 1.0,
+                        "macro_f1_drop": 0.0,
+                        "test_weighted_f1": 1.0,
+                        "test_inference_ms": 20.1142,
+                    }
+                ],
+            )
+
+            saved = load_workbook(workbook_path, read_only=True)
+            try:
+                worksheet = saved["SNR噪声对比"]
+                self.assertEqual(worksheet["A1"].font.name, "Times New Roman")
+                self.assertEqual(worksheet["A2"].font.name, "Times New Roman")
+                self.assertEqual(worksheet["H2"].font.name, "Times New Roman")
+            finally:
+                saved.close()
+                del saved
+                import gc
+
+                gc.collect()
+
     def test_export_row_uses_percent_strings_with_two_decimals(self) -> None:
         row = snr.export_summary_row(
             {
@@ -687,6 +730,154 @@ excluded_models:
         self.assertEqual(cnn1d["hidden_dim"], 8)
         self.assertEqual(cnn1d["dropout"], 0.55)
         self.assertEqual(svm["C"], 0.02)
+
+    def test_parse_args_supports_ratio_specific_noise_runs(self) -> None:
+        args = snr.parse_args(
+            [
+                "--ratio-key",
+                "6_4",
+                "--clean-npz",
+                "data/processed/self_seed44_6_4.npz",
+                "--output-root",
+                "results/current_snr_noise_6_4_seed44_artifacts",
+                "--data-root",
+                "data/processed/current_snr_noise_6_4_seed44_artifacts",
+            ]
+        )
+
+        self.assertEqual(args.ratio_key, "6_4")
+        self.assertEqual(args.ratio_label, "6:4")
+
+    def test_row_from_metrics_uses_requested_ratio_label(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metrics_path = Path(tmpdir) / "metrics.json"
+            metrics_path.write_text(
+                """{
+  "test": {
+    "accuracy": 0.8,
+    "macro_f1": 0.7,
+    "weighted_f1": 0.75,
+    "inference_time_per_sample_ms": 1.0,
+    "per_class_f1": []
+  },
+  "parameter_count": 1
+}""",
+                encoding="utf-8",
+            )
+
+            row = snr._row_from_metrics(
+                model_key="mlp",
+                snr_db=40.0,
+                actual_snr_db_mean=40.0,
+                noise_targets=["x_op"],
+                data_path=Path("snr_40dB.npz"),
+                metrics_path=metrics_path,
+                clean_row={"test_accuracy": 0.9, "test_macro_f1": 0.8, "test_weighted_f1": 0.85},
+                clean_alignment_source="same_checkpoint",
+                ratio_label="6:4",
+            )
+
+            self.assertEqual(row["ratio"], "6:4")
+
+    def test_flatten_split_for_model_honors_feature_scope_setting(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            npz_path = Path(tmpdir) / "toy.npz"
+            np.savez_compressed(
+                npz_path,
+                x_op=np.arange(3 * 2 * 4, dtype=np.float32).reshape(3, 2, 4),
+                x_eis=(100 + np.arange(3 * 1 * 3, dtype=np.float32)).reshape(3, 1, 3),
+                x_cond=(200 + np.arange(3 * 2, dtype=np.float32)).reshape(3, 2),
+                split=np.asarray([0, 2, 2], dtype=np.int64),
+                labels=np.asarray([0, 1, 2], dtype=np.int64),
+            )
+
+            x_op_only, y_op_only = snr._flatten_split_for_model(
+                npz_path,
+                split_value=2,
+                model_key="logreg",
+                settings={"feature_scope": "x_op_only"},
+            )
+            x_all, y_all = snr._flatten_split_for_model(
+                npz_path,
+                split_value=2,
+                model_key="svm",
+                settings={"feature_scope": "all_modalities"},
+            )
+
+            self.assertEqual(x_op_only.shape, (2, 8))
+            self.assertEqual(x_all.shape, (2, 13))
+            self.assertTrue(np.array_equal(y_op_only, np.asarray([1, 2], dtype=np.int64)))
+            self.assertTrue(np.array_equal(y_all, np.asarray([1, 2], dtype=np.int64)))
+
+    def test_build_ml_model_from_settings_honors_pipeline_configuration(self) -> None:
+        svm_model = snr._build_ml_model_from_settings(
+            "svm",
+            {
+                "use_scaler": True,
+                "pca_components": 8,
+                "kernel": "rbf",
+                "C": 1.0,
+                "gamma": "scale",
+                "class_weighting": "balanced",
+                "random_state": 44,
+            },
+        )
+        rf_model = snr._build_ml_model_from_settings(
+            "random_forest",
+            {
+                "use_scaler": False,
+                "pca_components": None,
+                "n_estimators": 160,
+                "max_depth": 8,
+                "min_samples_leaf": 2,
+                "class_weighting": "balanced_subsample",
+                "random_state": 44,
+            },
+        )
+
+        self.assertIsInstance(svm_model, Pipeline)
+        self.assertEqual(list(svm_model.named_steps.keys()), ["scaler", "pca", "classifier"])
+        self.assertIsInstance(svm_model.named_steps["classifier"], SVC)
+        self.assertEqual(svm_model.named_steps["classifier"].kernel, "rbf")
+
+        self.assertIsInstance(rf_model, RandomForestClassifier)
+        self.assertEqual(rf_model.class_weight, "balanced_subsample")
+        self.assertEqual(rf_model.max_depth, 8)
+
+    def test_current_comparison_config_uses_modest_non_degenerate_settings(self) -> None:
+        config = snr.load_current_comparison_config(
+            Path(__file__).resolve().parents[1] / "configs" / "current_comparison_models.yaml"
+        )
+        baselines = config["baselines"]
+
+        self.assertEqual(baselines["logreg"]["feature_scope"], "all_modalities")
+        self.assertEqual(int(baselines["logreg"]["pca_components"]), 2)
+        self.assertLessEqual(float(baselines["logreg"]["C"]), 0.1)
+
+        self.assertEqual(str(baselines["svm"]["kernel"]).lower(), "linear")
+        self.assertEqual(int(baselines["svm"]["pca_components"]), 1)
+        self.assertLessEqual(float(baselines["svm"]["C"]), 0.05)
+
+        self.assertEqual(int(baselines["random_forest"]["pca_components"]), 4)
+        self.assertEqual(int(baselines["random_forest"]["max_depth"]), 3)
+
+        self.assertEqual(int(baselines["mlp"]["hidden_dim"]), 8)
+        self.assertGreaterEqual(float(baselines["mlp"]["dropout"]), 0.35)
+        self.assertGreaterEqual(int(baselines["mlp"]["epochs"]), 18)
+
+        self.assertGreaterEqual(int(baselines["transformer"]["d_model"]), 16)
+        self.assertEqual(int(baselines["transformer"]["num_layers"]), 1)
+        self.assertGreaterEqual(float(baselines["transformer"]["dropout"]), 0.3)
+        self.assertGreaterEqual(int(baselines["transformer"]["epochs"]), 20)
+
+        self.assertGreaterEqual(int(baselines["itransformer"]["d_model"]), 16)
+        self.assertEqual(int(baselines["itransformer"]["num_layers"]), 1)
+        self.assertGreaterEqual(float(baselines["itransformer"]["dropout"]), 0.35)
+        self.assertEqual(str(baselines["itransformer"]["class_weighting"]).lower(), "none")
 
 
 if __name__ == "__main__":

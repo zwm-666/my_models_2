@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from copy import copy
 import json
 import math
 import shutil
@@ -21,9 +22,9 @@ from openpyxl import load_workbook
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import make_pipeline
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import LinearSVC
+from sklearn.svm import LinearSVC, SVC
 import yaml
 
 
@@ -493,6 +494,7 @@ def _row_from_metrics(
     metrics_path: Path,
     clean_row: dict[str, Any],
     clean_alignment_source: str,
+    ratio_label: str = "8:2",
 ) -> dict[str, Any]:
     payload = _metric_payload(metrics_path)
     metrics = _test_metrics(payload)
@@ -503,7 +505,7 @@ def _row_from_metrics(
     test_macro = float(metrics.get("macro_f1", 0.0))
     test_weighted = float(metrics.get("weighted_f1", 0.0))
     return {
-        "ratio": "8:2",
+        "ratio": ratio_label,
         "model": model_key,
         "category": MODEL_CATEGORIES[model_key],
         "snr_db": _snr_token(snr_db),
@@ -529,11 +531,12 @@ def _clean_row_from_metrics(
     metrics_path: Path,
     data_path: Path,
     clean_alignment_source: str | None = None,
+    ratio_label: str = "8:2",
 ) -> dict[str, Any]:
     payload = _metric_payload(metrics_path)
     metrics = _test_metrics(payload)
     return {
-        "ratio": "8:2",
+        "ratio": ratio_label,
         "model": model_key,
         "category": MODEL_CATEGORIES[model_key],
         "snr_db": "clean",
@@ -667,16 +670,24 @@ def summary_row_to_workbook_values(row: dict[str, Any]) -> list[Any]:
 
 def update_workbook_snr_sheet(workbook_path: Path, rows: list[dict[str, Any]], sheet_name: str = "SNR噪声对比") -> None:
     workbook = load_workbook(workbook_path)
-    if sheet_name not in workbook.sheetnames:
-        worksheet = workbook.create_sheet(sheet_name)
-        worksheet.append(["模型", "SNR(dB)", "Accuracy", "Acc下降", "Macro-F1", "Macro下降", "Weighted-F1", "推理时间(ms/sample)"])
-    else:
-        worksheet = workbook[sheet_name]
-    if worksheet.max_row > 1:
-        worksheet.delete_rows(2, worksheet.max_row - 1)
-    for row in rows:
-        worksheet.append(summary_row_to_workbook_values(row))
-    workbook.save(workbook_path)
+    try:
+        if sheet_name not in workbook.sheetnames:
+            worksheet = workbook.create_sheet(sheet_name)
+            worksheet.append(["模型", "SNR(dB)", "Accuracy", "Acc下降", "Macro-F1", "Macro下降", "Weighted-F1", "推理时间(ms/sample)"])
+        else:
+            worksheet = workbook[sheet_name]
+        if worksheet.max_row > 1:
+            worksheet.delete_rows(2, worksheet.max_row - 1)
+        for row in rows:
+            worksheet.append(summary_row_to_workbook_values(row))
+        for worksheet_row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
+            for cell in worksheet_row:
+                font = copy(cell.font)
+                font.name = "Times New Roman"
+                cell.font = font
+        workbook.save(workbook_path)
+    finally:
+        workbook.close()
 
 
 def _copy_clean_rows_to_metrics(output_root: Path, clean_rows: list[dict[str, Any]]) -> None:
@@ -693,7 +704,29 @@ def _copy_clean_rows_to_metrics(output_root: Path, clean_rows: list[dict[str, An
             shutil.copy2(source, target)
 
 
-def _flatten_split_for_model(npz_path: Path, split_value: int, model_key: str) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+def _normalize_feature_scope(model_key: str, settings: dict[str, Any] | None = None) -> str:
+    payload = settings or {}
+    raw_scope = str(payload.get("feature_scope", "")).strip().lower()
+    if not raw_scope:
+        return "x_op_only" if model_key == "logreg" else "all_modalities"
+    aliases = {
+        "x_op": "x_op_only",
+        "x_op_only": "x_op_only",
+        "op_only": "x_op_only",
+        "all": "all_modalities",
+        "all_modalities": "all_modalities",
+        "x_op+x_eis+x_cond": "all_modalities",
+        "multimodal": "all_modalities",
+    }
+    return aliases.get(raw_scope, raw_scope)
+
+
+def _flatten_split_for_model(
+    npz_path: Path,
+    split_value: int,
+    model_key: str,
+    settings: dict[str, Any] | None = None,
+) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
     data = np.load(npz_path)
     split = np.asarray(data["split"], dtype=np.int64)
     indices = np.where(split == int(split_value))[0]
@@ -702,8 +735,37 @@ def _flatten_split_for_model(npz_path: Path, split_value: int, model_key: str) -
     x_op = np.asarray(data["x_op"][indices], dtype=np.float32)
     x_eis = np.asarray(data["x_eis"][indices], dtype=np.float32)
     x_cond = np.asarray(data[cond_key][indices], dtype=np.float32)
-    if model_key == "logreg":
+    feature_scope = _normalize_feature_scope(model_key, settings)
+    if feature_scope == "x_op_only":
         features = x_op.reshape(len(indices), -1)
+    elif feature_scope == "x_eis_only":
+        features = x_eis.reshape(len(indices), -1)
+    elif feature_scope == "x_cond_only":
+        features = x_cond.reshape(len(indices), -1)
+    elif feature_scope == "x_op+x_eis":
+        features = np.concatenate(
+            [
+                x_op.reshape(len(indices), -1),
+                x_eis.reshape(len(indices), -1),
+            ],
+            axis=1,
+        )
+    elif feature_scope == "x_op+x_cond":
+        features = np.concatenate(
+            [
+                x_op.reshape(len(indices), -1),
+                x_cond.reshape(len(indices), -1),
+            ],
+            axis=1,
+        )
+    elif feature_scope == "x_eis+x_cond":
+        features = np.concatenate(
+            [
+                x_eis.reshape(len(indices), -1),
+                x_cond.reshape(len(indices), -1),
+            ],
+            axis=1,
+        )
     else:
         features = np.concatenate(
             [
@@ -717,43 +779,70 @@ def _flatten_split_for_model(npz_path: Path, split_value: int, model_key: str) -
     return features, labels
 
 
+def _normalize_class_weight(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() == "none":
+        return None
+    return raw
+
+
+def _resolve_pca_components(value: Any) -> int | None:
+    if value in (None, "", "None", "none", 0, "0", False):
+        return None
+    return int(value)
+
+
 def _build_ml_model_from_settings(model_key: str, settings: dict[str, Any]) -> Any:
+    use_scaler = bool(settings.get("use_scaler", model_key != "random_forest"))
+    pca_components = _resolve_pca_components(settings.get("pca_components", 1))
+    class_weight = _normalize_class_weight(settings.get("class_weighting", settings.get("class_weight", "none")))
+    steps: list[tuple[str, Any]] = []
+    if use_scaler:
+        steps.append(("scaler", StandardScaler()))
+    if pca_components is not None:
+        steps.append(("pca", PCA(n_components=pca_components)))
     if model_key == "logreg":
-        return make_pipeline(
-            StandardScaler(),
-            PCA(n_components=1),
-            LogisticRegression(
-                C=float(settings.get("C", 1.0)),
-                max_iter=int(settings.get("max_iter", 1000)),
-                class_weight=None,
-                random_state=int(settings.get("random_state", 44)),
-            ),
+        classifier = LogisticRegression(
+            C=float(settings.get("C", 1.0)),
+            max_iter=int(settings.get("max_iter", 1000)),
+            class_weight=class_weight,
+            random_state=int(settings.get("random_state", 44)),
         )
+        steps.append(("classifier", classifier))
+        return Pipeline(steps)
     if model_key == "svm":
-        return make_pipeline(
-            StandardScaler(),
-            PCA(n_components=1),
-            LinearSVC(
+        kernel = str(settings.get("kernel", "linear")).strip().lower()
+        if kernel in {"linear", "linear_svc", "linearsvc"}:
+            classifier = LinearSVC(
                 C=float(settings.get("C", 1.0)),
                 max_iter=int(settings.get("max_iter", 5000)),
-                class_weight=None,
+                class_weight=class_weight,
                 random_state=int(settings.get("random_state", 44)),
-            ),
-        )
+            )
+        else:
+            classifier = SVC(
+                kernel=kernel,
+                C=float(settings.get("C", 1.0)),
+                gamma=settings.get("gamma", "scale"),
+                class_weight=class_weight,
+                random_state=int(settings.get("random_state", 44)),
+            )
+        steps.append(("classifier", classifier))
+        return Pipeline(steps)
     if model_key == "random_forest":
-        return make_pipeline(
-            StandardScaler(),
-            PCA(n_components=1),
-            RandomForestClassifier(
-                n_estimators=int(settings.get("n_estimators", 40)),
-                max_depth=None if settings.get("max_depth") in (None, "", "None") else int(settings.get("max_depth")),
-                min_samples_leaf=int(settings.get("min_samples_leaf", 1)),
-                max_features=settings.get("max_features", "sqrt"),
-                class_weight=None,
-                random_state=int(settings.get("random_state", 44)),
-                n_jobs=-1,
-            ),
+        classifier = RandomForestClassifier(
+            n_estimators=int(settings.get("n_estimators", 40)),
+            max_depth=None if settings.get("max_depth") in (None, "", "None") else int(settings.get("max_depth")),
+            min_samples_leaf=int(settings.get("min_samples_leaf", 1)),
+            max_features=settings.get("max_features", "sqrt"),
+            class_weight=class_weight,
+            random_state=int(settings.get("random_state", 44)),
+            n_jobs=-1,
         )
+        if not steps:
+            return classifier
+        steps.append(("classifier", classifier))
+        return Pipeline(steps)
     raise KeyError(model_key)
 
 
@@ -796,7 +885,8 @@ def _train_and_evaluate(
     clean_eval_npz = ROOT / args.data_root / "clean.npz"
     data_root = ROOT / args.data_root
     comparison_config = getattr(args, "_comparison_config", load_current_comparison_config(ROOT / args.comparison_config))
-    ratio_key = "8_2"
+    ratio_key = str(args.ratio_key)
+    ratio_label = str(args.ratio_label)
     noise_rows: list[dict[str, Any]] = []
     modality_rows: list[dict[str, Any]] = []
     fresh_clean_by_model: dict[str, dict[str, Any]] = dict(clean_by_model)
@@ -811,12 +901,12 @@ def _train_and_evaluate(
         print(f"\n=== 准备模型: {model_key} ===", flush=True)
         if model_key in ml_models:
             settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
-            x_train, y_train = _flatten_split_for_model(clean_npz, split_value=0, model_key=model_key)
+            x_train, y_train = _flatten_split_for_model(clean_npz, split_value=0, model_key=model_key, settings=settings)
             model = _build_ml_model_from_settings(model_key, settings)
             model.fit(x_train, y_train)
             trained_models[model_key] = model
-            x_val, y_val = _flatten_split_for_model(clean_npz, split_value=1, model_key=model_key)
-            x_test, y_test = _flatten_split_for_model(clean_eval_npz, split_value=2, model_key=model_key)
+            x_val, y_val = _flatten_split_for_model(clean_npz, split_value=1, model_key=model_key, settings=settings)
+            x_test, y_test = _flatten_split_for_model(clean_eval_npz, split_value=2, model_key=model_key, settings=settings)
             import time
 
             start = time.perf_counter()
@@ -839,6 +929,7 @@ def _train_and_evaluate(
                 clean_metrics_path,
                 clean_eval_npz,
                 clean_alignment_source=str(clean_metrics_path),
+                ratio_label=ratio_label,
             )
             if model_key in clean_by_model:
                 fresh_clean_by_model[model_key] = choose_clean_row_for_noise_alignment(
@@ -912,6 +1003,7 @@ def _train_and_evaluate(
                     clean_metrics_path,
                     clean_eval_npz,
                     clean_alignment_source=str(checkpoint_path),
+                    ratio_label=ratio_label,
                 )
         elif model_key == "proposed":
             settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
@@ -954,6 +1046,7 @@ def _train_and_evaluate(
                     clean_metrics_path,
                     clean_eval_npz,
                     clean_alignment_source=str(proposed_checkpoint),
+                    ratio_label=ratio_label,
                 )
         else:
             raise KeyError(model_key)
@@ -968,8 +1061,9 @@ def _train_and_evaluate(
             if model_key in ml_models:
                 model = trained_models[model_key]
                 num_classes = baseline._num_classes(clean_npz)
-                x_val, y_val = _flatten_split_for_model(clean_npz, split_value=1, model_key=model_key)
-                x_test, y_test = _flatten_split_for_model(npz_path, split_value=2, model_key=model_key)
+                settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
+                x_val, y_val = _flatten_split_for_model(clean_npz, split_value=1, model_key=model_key, settings=settings)
+                x_test, y_test = _flatten_split_for_model(npz_path, split_value=2, model_key=model_key, settings=settings)
                 import time
 
                 start = time.perf_counter()
@@ -1042,6 +1136,7 @@ def _train_and_evaluate(
                     metrics_path=metrics_path,
                     clean_row=clean_row,
                     clean_alignment_source=clean_source,
+                    ratio_label=ratio_label,
                 )
             )
     if proposed_checkpoint is not None and "proposed" in fresh_clean_by_model:
@@ -1077,6 +1172,7 @@ def _train_and_evaluate(
                         metrics_path=eval_dir / "metrics.json",
                         clean_row=proposed_clean_row,
                         clean_alignment_source=str(proposed_checkpoint),
+                        ratio_label=ratio_label,
                     )
                 )
     return noise_rows, fresh_clean_by_model, modality_rows
@@ -1085,6 +1181,8 @@ def _train_and_evaluate(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="重新生成 SNR 噪声测试结果，并替换总表中的旧噪声结果")
     parser.add_argument("--clean-npz", default="data/processed/self_seed44_8_2.npz")
+    parser.add_argument("--ratio-key", default="8_2", choices=["8_2", "7_3", "6_4", "5_5"])
+    parser.add_argument("--ratio-label", default=None)
     parser.add_argument("--comparison-config", default="configs/current_comparison_models.yaml")
     parser.add_argument("--baseline-clean-summary", default="results/updated_dataset_baseline_ratio_comparison_20260513_seed44/test_summary.csv")
     parser.add_argument("--proposed-clean-summary", default="results/updated_dataset_proposed_ratio_comparison_20260513_seed44/proposed_summary.csv")
@@ -1127,7 +1225,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--write-proposed-modality-summary", action=argparse.BooleanOptionalAction, default=True, help="输出 proposed 单模态噪声副表")
     parser.add_argument("--clear-previous-results", action=argparse.BooleanOptionalAction, default=True, help="运行前清理旧的噪声实验中间产物和主表")
     parser.add_argument("--skip-workbook", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.ratio_label is None:
+        args.ratio_label = str(args.ratio_key).replace("_", ":")
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:

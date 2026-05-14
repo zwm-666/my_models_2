@@ -116,12 +116,16 @@ def run_evaluation(
     output_dir: str,
     strict: bool = True,
     split: str = "test",
+    config_overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     data = np.load(data_path)
     indices = split_indices_from_npz(data, split)
     full_dataset = FuelCellNPZDataset(data_path)
     dataset = FuelCellNPZDataset(data_path, indices)
-    config = sync_config_with_dataset(load_config(config_path), full_dataset)
+    raw_config = load_config(config_path)
+    if config_overrides:
+        raw_config.update(dict(config_overrides))
+    config = sync_config_with_dataset(raw_config, full_dataset)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)

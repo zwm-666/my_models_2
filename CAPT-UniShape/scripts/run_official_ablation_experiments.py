@@ -17,11 +17,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 _train = importlib.import_module("train")
+_evaluate = importlib.import_module("evaluate")
+_snr = importlib.import_module("scripts.refresh_snr_noise_results")
 load_config = _train.load_config
 run_training = _train.run_training
+run_evaluation = _evaluate.run_evaluation
+write_test_subset_with_snr_noise = _snr.write_test_subset_with_snr_noise
 
 DEFAULT_ABLATION_VARIANTS = ["full_rbf", "no_rbf", "no_kan_fusion", "static_prototype", "no_condition_input"]
 DEFAULT_FULL_METRICS_PATH = ""
+DEFAULT_ABLATION_SNR_DBS = [40.0, 30.0, 25.0, 20.0]
+DEFAULT_NOISE_TARGETS = ["x_op", "x_eis", "x_cond"]
 
 ABLATIONS: dict[str, dict[str, Any]] = {
     "full_rbf": {
@@ -140,6 +146,199 @@ def _format_summary_value(value: Any) -> Any:
     return value
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pct(value: Any) -> str:
+    return f"{100.0 * _safe_float(value):.2f}%"
+
+
+def _snr_token(value: float) -> str:
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:g}"
+
+
+def _variant_overrides(spec: dict[str, Any]) -> dict[str, Any]:
+    return dict(spec.get("overrides", {}))
+
+
+def _active_noise_targets(spec: dict[str, Any], requested_targets: list[str]) -> list[str]:
+    zero_keys = set(str(key) for key in spec.get("data_zero", []))
+    return [target for target in requested_targets if target not in zero_keys]
+
+
+def _load_test_payload(metrics_path: Path) -> dict[str, Any]:
+    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    test_payload = payload.get("test")
+    if isinstance(test_payload, dict):
+        return test_payload
+    return payload
+
+
+def _snr_result_row(
+    *,
+    variant: str,
+    description: str,
+    snr_db: str,
+    actual_snr_db_mean: Any,
+    noise_targets: list[str],
+    zeroed_inputs: list[str],
+    data_path: Path,
+    metrics_path: Path,
+    clean_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    metrics = _load_test_payload(metrics_path)
+    test_accuracy = float(metrics.get("accuracy", 0.0))
+    test_macro_f1 = float(metrics.get("macro_f1", 0.0))
+    test_weighted_f1 = float(metrics.get("weighted_f1", 0.0))
+    clean_accuracy = float(clean_metrics.get("accuracy", 0.0))
+    clean_macro_f1 = float(clean_metrics.get("macro_f1", 0.0))
+    clean_weighted_f1 = float(clean_metrics.get("weighted_f1", 0.0))
+    return {
+        "variant": variant,
+        "description": description,
+        "snr_db": snr_db,
+        "actual_snr_db_mean": actual_snr_db_mean,
+        "noise_targets": "+".join(noise_targets),
+        "zeroed_inputs": "+".join(zeroed_inputs),
+        "test_accuracy": test_accuracy,
+        "accuracy_drop": clean_accuracy - test_accuracy,
+        "test_macro_f1": test_macro_f1,
+        "macro_f1_drop": clean_macro_f1 - test_macro_f1,
+        "test_weighted_f1": test_weighted_f1,
+        "weighted_f1_drop": clean_weighted_f1 - test_weighted_f1,
+        "test_inference_ms": float(metrics.get("inference_time_per_sample_ms", 0.0)),
+        "parameter_count": int(json.loads(metrics_path.read_text(encoding="utf-8")).get("parameter_count", 0)),
+        "data_path": str(data_path),
+        "metrics_path": str(metrics_path),
+    }
+
+
+def _paper_snr_row(row: dict[str, Any]) -> dict[str, Any]:
+    actual_snr = row.get("actual_snr_db_mean", "")
+    return {
+        "variant": row["variant"],
+        "description": row["description"],
+        "snr_db": row["snr_db"],
+        "actual_snr_db_mean": "" if actual_snr == "" else f"{_safe_float(actual_snr):.4f}",
+        "noise_targets": row["noise_targets"],
+        "zeroed_inputs": row["zeroed_inputs"],
+        "Acc": _pct(row["test_accuracy"]),
+        "Acc_drop": _pct(row["accuracy_drop"]),
+        "Macro-F1": _pct(row["test_macro_f1"]),
+        "Macro-F1_drop": _pct(row["macro_f1_drop"]),
+        "Weighted-F1": _pct(row["test_weighted_f1"]),
+        "Weighted-F1_drop": _pct(row["weighted_f1_drop"]),
+        "test_inference_ms": f"{_safe_float(row['test_inference_ms']):.4f}",
+        "parameter_count": row["parameter_count"],
+        "metrics_path": row["metrics_path"],
+    }
+
+
+def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def run_snr_ablation_evaluation(args: argparse.Namespace) -> None:
+    base_npz = ROOT / args.data
+    output_root = ROOT / (args.snr_output_root or args.output_root)
+    data_root = ROOT / (args.snr_data_root or args.data_root)
+    checkpoint_root = ROOT / args.reuse_checkpoints_root
+    output_root.mkdir(parents=True, exist_ok=True)
+    data_root.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, Any]] = []
+    requested_targets = list(args.noise_targets)
+    for variant in args.variants:
+        spec = ABLATIONS[variant]
+        description = str(spec["description"])
+        zero_keys = list(spec.get("data_zero", []))
+        variant_clean_npz = _make_data_variant(base_npz, data_root / variant / "clean.npz", zero_keys)
+        checkpoint_path = checkpoint_root / variant / "best.ckpt"
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"{variant} 缺少 checkpoint: {checkpoint_path}")
+
+        clean_eval_dir = output_root / variant / "clean"
+        print(f"\n=== SNR 消融评估: {variant} clean ===", flush=True)
+        run_evaluation(
+            str(ROOT / str(spec["config"])),
+            str(variant_clean_npz),
+            str(checkpoint_path),
+            str(clean_eval_dir),
+            split="test",
+            config_overrides=_variant_overrides(spec),
+        )
+        clean_metrics_path = clean_eval_dir / "metrics.json"
+        clean_metrics = _load_test_payload(clean_metrics_path)
+        rows.append(
+            _snr_result_row(
+                variant=variant,
+                description=description,
+                snr_db="clean",
+                actual_snr_db_mean="",
+                noise_targets=_active_noise_targets(spec, requested_targets),
+                zeroed_inputs=zero_keys,
+                data_path=variant_clean_npz,
+                metrics_path=clean_metrics_path,
+                clean_metrics=clean_metrics,
+            )
+        )
+
+        active_targets = _active_noise_targets(spec, requested_targets)
+        if not active_targets:
+            raise ValueError(f"{variant} 没有可加噪输入；requested_targets={requested_targets}, zero_keys={zero_keys}")
+        for snr_db in args.snr_dbs:
+            label = _snr_token(float(snr_db))
+            noisy_npz = data_root / variant / f"snr_{label}dB.npz"
+            noise_summary = write_test_subset_with_snr_noise(
+                variant_clean_npz,
+                noisy_npz,
+                snr_db=float(snr_db),
+                noise_targets=active_targets,
+                seed=int(args.snr_seed) + int(round(float(snr_db) * 10.0)),
+            )
+            eval_dir = output_root / variant / f"snr_{label}dB"
+            print(f"=== SNR 消融评估: {variant} {label}dB ===", flush=True)
+            run_evaluation(
+                str(ROOT / str(spec["config"])),
+                str(noisy_npz),
+                str(checkpoint_path),
+                str(eval_dir),
+                split="test",
+                config_overrides=_variant_overrides(spec),
+            )
+            rows.append(
+                _snr_result_row(
+                    variant=variant,
+                    description=description,
+                    snr_db=label,
+                    actual_snr_db_mean=float(noise_summary["actual_snr_db_mean"]),
+                    noise_targets=active_targets,
+                    zeroed_inputs=zero_keys,
+                    data_path=noisy_npz,
+                    metrics_path=eval_dir / "metrics.json",
+                    clean_metrics=clean_metrics,
+                )
+            )
+
+    summary_path = output_root / "summary.csv"
+    paper_summary_path = ROOT / args.snr_summary_path
+    _write_rows(summary_path, [{key: _format_summary_value(value) for key, value in row.items()} for row in rows])
+    _write_rows(paper_summary_path, [_paper_snr_row(row) for row in rows])
+    print(f"\n已写入 SNR 消融汇总: {summary_path}", flush=True)
+    print(f"已写入论文口径 SNR 消融表: {paper_summary_path}", flush=True)
+
+
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="运行官方 CAPT-UniShape 消融实验")
     parser.add_argument("--data", default="data/processed/self_seed44_8_2.npz")
@@ -159,11 +358,22 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--refit-trainval", action=argparse.BooleanOptionalAction, default=None, help="验证集只用于选epoch，最终模型用train+val重训；默认使用配置文件设置")
     parser.add_argument("--min-epochs-before-stop", type=int, default=None)
     parser.add_argument("--val-metric-smoothing", type=int, default=None)
+    parser.add_argument("--snr-eval-only", action="store_true", help="复用已有消融 checkpoint，只评估 clean 与 SNR 噪声测试集")
+    parser.add_argument("--reuse-checkpoints-root", default="results/current_ablation_updated_dataset_seed44_6_4")
+    parser.add_argument("--snr-output-root", default="results/current_ablation_snr_updated_dataset_seed44_6_4")
+    parser.add_argument("--snr-data-root", default="data/processed/current_ablation_snr_updated_dataset_seed44_6_4")
+    parser.add_argument("--snr-summary-path", default="results/消融实验SNR新表.csv")
+    parser.add_argument("--snr-dbs", nargs="+", type=float, default=DEFAULT_ABLATION_SNR_DBS)
+    parser.add_argument("--noise-targets", nargs="+", default=DEFAULT_NOISE_TARGETS, choices=DEFAULT_NOISE_TARGETS)
+    parser.add_argument("--snr-seed", type=int, default=44)
     return parser.parse_args(args)
 
 
 def main() -> None:
     args = parse_args()
+    if args.snr_eval_only:
+        run_snr_ablation_evaluation(args)
+        return
 
     base_npz = ROOT / args.data
     output_root = ROOT / args.output_root
