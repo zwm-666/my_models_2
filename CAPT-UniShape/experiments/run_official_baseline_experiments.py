@@ -12,6 +12,7 @@ import warnings
 from pathlib import Path
 from typing import Any, cast
 
+import joblib
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -29,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_converter = importlib.import_module("scripts.build_official_npz_from_self_excel")
+_converter = importlib.import_module("experiments.build_official_npz_from_self_excel")
 _train = importlib.import_module("train")
 build_npz = _converter.build_npz
 load_config = _train.load_config
@@ -574,6 +575,10 @@ def run_ml_baseline(model_key: str, npz_path: Path, output_dir: Path, seed: int,
     }
     if refit_trainval:
         extra_payload["refit_val_in_sample"] = refit_val_metrics
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / "model.joblib"
+    joblib.dump(model, model_path)
+    extra_payload["model_artifact_path"] = str(model_path)
     return _save_result(output_dir, selection_val_metrics, test_metrics, _ml_parameter_count(model), extra_payload=extra_payload)
 
 
@@ -1023,3 +1028,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

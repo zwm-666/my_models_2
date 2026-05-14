@@ -66,7 +66,7 @@ split  = 训练 / 验证 / 测试划分
 直接运行：
 
 ```powershell
-python scripts/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models proposed logreg svm random_forest mlp cnn1d lstm transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-protocol fixed_test --split-retries 50 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
+python experiments/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models proposed logreg svm random_forest mlp cnn1d lstm transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-protocol fixed_test --split-retries 50 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
 ```
 
 该命令会自动生成四组比例数据，并训练全部基准模型。
@@ -104,7 +104,7 @@ Kaggle 终端中每个模型训练结束后也会打印类似下面的测试集�
 如果中途只想补跑某几个模型，可以改 `--models`，例如：
 
 ```powershell
-python scripts/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-protocol fixed_test --split-retries 50 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
+python experiments/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-protocol fixed_test --split-retries 50 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
 ```
 
 注意：新版脚本会重写 `summary.csv`，避免绘图误读历史旧行。若要从零重新跑并清空旧模型目录，请先删除旧的 `results/official_baseline_comparison/` 和 `data/processed/official_baseline_comparison/`，或者换一个新的 `--output-root` / `--data-root`。
@@ -151,13 +151,13 @@ results/official_baseline_multiseed/ranked_multiseed_test_summary.csv
 先生成消融实验使用的 64 点窗口数据：
 
 ```powershell
-python scripts/build_official_npz_from_self_excel.py --excel "data/raw/测试数据.xlsx" --output "data/processed/official_self_stack_impedance_eis_w64_stable.npz" --window-size 64 --stride-train 16 --stride-eval 32 --eis-seq-len 128 --split-mode segment --segment-block-seconds 300 --op-source stack --test-size 0.2 --val-size 0.25 --split-retries 50
+python experiments/build_official_npz_from_self_excel.py --excel "data/raw/测试数据.xlsx" --output "data/processed/official_self_stack_impedance_eis_w64_stable.npz" --window-size 64 --stride-train 16 --stride-eval 32 --eis-seq-len 128 --split-mode segment --segment-block-seconds 300 --op-source stack --test-size 0.2 --val-size 0.25 --split-retries 50
 ```
 
 然后运行完整消融：
 
 ```powershell
-python scripts/run_official_ablation_experiments.py --data data/processed/official_self_stack_impedance_eis_w64_stable.npz --variants full_rbf no_rbf no_kan_fusion static_prototype no_transport_reg no_separation_reg no_eis_input no_condition_input stack_only eis_cond_only --epochs 80 --patience 10 --output-root results/official_ablation --data-root data/processed/official_ablation
+python experiments/run_official_ablation_experiments.py --data data/processed/official_self_stack_impedance_eis_w64_stable.npz --variants full_rbf no_rbf no_kan_fusion static_prototype no_transport_reg no_separation_reg no_eis_input no_condition_input stack_only eis_cond_only --epochs 80 --patience 10 --output-root results/official_ablation --data-root data/processed/official_ablation
 ```
 
 输出目录示例：
@@ -195,7 +195,7 @@ results/official_ablation/summary.csv
 默认跑 8:2，一次训练干净模型，再对测试集加入多种噪声强度：
 
 ```powershell
-python scripts/run_official_noise_experiments.py --ratio 8_2 --models rbf no_rbf --noise-stds 0.0 0.01 0.03 0.05 0.10 --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-retries 50 --output-root results/official_noise_experiments --data-root data/processed/official_noise_experiments
+python experiments/run_official_noise_experiments.py --ratio 8_2 --models rbf no_rbf --noise-stds 0.0 0.01 0.03 0.05 0.10 --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-retries 50 --output-root results/official_noise_experiments --data-root data/processed/official_noise_experiments
 ```
 
 说明：
@@ -264,19 +264,19 @@ cd "D:\learn\论文所需材料\论文2\CAPT-UniShape"
 ```
 
 ```powershell
-python scripts/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models proposed logreg svm random_forest mlp cnn1d lstm transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-protocol fixed_test --split-retries 50 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
+python experiments/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models proposed logreg svm random_forest mlp cnn1d lstm transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-protocol fixed_test --split-retries 50 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
 ```
 
 ```powershell
-python scripts/build_official_npz_from_self_excel.py --excel "data/raw/测试数据.xlsx" --output "data/processed/official_self_stack_impedance_eis_w64_stable.npz" --window-size 64 --stride-train 16 --stride-eval 32 --eis-seq-len 128 --split-mode segment --segment-block-seconds 300 --op-source stack --test-size 0.2 --val-size 0.25 --split-retries 50
+python experiments/build_official_npz_from_self_excel.py --excel "data/raw/测试数据.xlsx" --output "data/processed/official_self_stack_impedance_eis_w64_stable.npz" --window-size 64 --stride-train 16 --stride-eval 32 --eis-seq-len 128 --split-mode segment --segment-block-seconds 300 --op-source stack --test-size 0.2 --val-size 0.25 --split-retries 50
 ```
 
 ```powershell
-python scripts/run_official_ablation_experiments.py --data data/processed/official_self_stack_impedance_eis_w64_stable.npz --variants full_rbf no_rbf no_kan_fusion static_prototype no_transport_reg no_separation_reg no_eis_input no_condition_input stack_only eis_cond_only --epochs 80 --patience 10 --output-root results/official_ablation --data-root data/processed/official_ablation
+python experiments/run_official_ablation_experiments.py --data data/processed/official_self_stack_impedance_eis_w64_stable.npz --variants full_rbf no_rbf no_kan_fusion static_prototype no_transport_reg no_separation_reg no_eis_input no_condition_input stack_only eis_cond_only --epochs 80 --patience 10 --output-root results/official_ablation --data-root data/processed/official_ablation
 ```
 
 ```powershell
-python scripts/run_official_noise_experiments.py --ratio 8_2 --models rbf no_rbf --noise-stds 0.0 0.01 0.03 0.05 0.10 --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-retries 50 --output-root results/official_noise_experiments --data-root data/processed/official_noise_experiments
+python experiments/run_official_noise_experiments.py --ratio 8_2 --models rbf no_rbf --noise-stds 0.0 0.01 0.03 0.05 0.10 --epochs 80 --patience 10 --val-size 0.25 --stride-eval 32 --segment-block-seconds 300 --split-retries 50 --output-root results/official_noise_experiments --data-root data/processed/official_noise_experiments
 ```
 
 ```powershell
@@ -385,5 +385,6 @@ with zipfile.ZipFile(zip_path, 'r') as zf:
 之后按第 7 节的命令运行即可。Kaggle 的命令前面通常加 `!`，例如：
 
 ```python
-!python scripts/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models proposed logreg svm random_forest mlp cnn1d lstm transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 64 --segment-block-seconds 240 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
+!python experiments/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models proposed logreg svm random_forest mlp cnn1d lstm transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 64 --segment-block-seconds 240 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
 ```
+

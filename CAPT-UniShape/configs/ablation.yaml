@@ -1,7 +1,7 @@
-# CAPT-UniShape 消融对照：去掉 RBF 动态原型头
-# 对应 Official-CAPT-UniShape-KANFusion-NoRBF
-model_name: official_capt_unishape_kanfusion_no_rbf
-use_rbf_head: false
+# CAPT-UniShape 消融实验专用配置
+# 五个消融变体统一从该配置加载；具体模块开关由消融脚本 overrides 控制。
+model_name: official_capt_unishape_rbf_kanfusion
+use_rbf_head: true
 use_residual_kan_fusion: true
 
 # Input definition
@@ -29,12 +29,17 @@ kan_num_basis: 8
 kan_lambda: 0.1
 learnable_kan_lambda: true
 
-# No RBF head — uses MLP classifier
+# RBF condition-aware prototype head
+temperature: 0.07
+num_rbf_centers: 16
+use_condition_transport: true
+alpha_transport: 0.001
+alpha_sep: 0.001
 alpha_kan: 0.0001
 label_smoothing: 0.0
 
 experiment:
-  output_dir: results/proposed_no_rbf
+  output_dir: results/ablation
   seeds: [44]
   batch_size: 32
   epochs: 80

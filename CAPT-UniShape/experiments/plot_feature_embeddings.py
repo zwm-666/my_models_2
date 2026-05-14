@@ -159,7 +159,7 @@ def raw_feature_columns_for_mode(frame: Any, *, mode: str, label_col: str) -> li
             if str(col) not in {str(label_col), "__group_key__"}
         ]
     if normalized == "model_input":
-        from scripts.build_official_npz_from_self_excel import COND_COLS, STACK_COLS
+        from experiments.build_official_npz_from_self_excel import COND_COLS, STACK_COLS
 
         return list(STACK_COLS) + list(COND_COLS)
     raise ValueError(f"Unsupported raw feature mode: {mode!r}")
@@ -244,7 +244,7 @@ def raw_self_excel_feature_matrix(
 ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.int64]], dict[str, Any]]:
     import pandas as pd
 
-    from scripts.build_official_npz_from_self_excel import (
+    from experiments.build_official_npz_from_self_excel import (
         COND_COLS,
         LABEL_COL,
         STACK_COLS,
@@ -433,17 +433,17 @@ def extract_torch_baseline_features(model: Any, model_key: str, x_op: Any, x_eis
         features = torch.cat([x_op.flatten(1), x_eis.flatten(1), x_cond], dim=1)
         return model.net[:-1](features)
     if normalized == "cnn1d":
-        from scripts.run_official_baseline_experiments import _combined_sequence
+        from experiments.run_official_baseline_experiments import _combined_sequence
 
         return model.net[:-1](_combined_sequence(x_op, x_eis, x_cond))
     if normalized == "lstm":
-        from scripts.run_official_baseline_experiments import _combined_sequence
+        from experiments.run_official_baseline_experiments import _combined_sequence
 
         sequence = _combined_sequence(x_op, x_eis, x_cond).transpose(1, 2)
         output, _ = model.lstm(sequence)
         return output.mean(dim=1)
     if normalized == "transformer":
-        from scripts.run_official_baseline_experiments import _combined_sequence
+        from experiments.run_official_baseline_experiments import _combined_sequence
 
         sequence = _combined_sequence(x_op, x_eis, x_cond).transpose(1, 2)
         encoded = model.encoder(model.input_proj(sequence) + model.pos_embed[:, : sequence.shape[1]])
@@ -493,7 +493,7 @@ def extract_baseline_feature_matrix(
 ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], str]:
     import torch
 
-    from scripts.run_official_baseline_experiments import _build_torch_model
+    from experiments.run_official_baseline_experiments import _build_torch_model
 
     payload, state_dict = _checkpoint_state_dict(checkpoint_path)
     resolved_model_key = model_key or str(payload.get("model_key") or checkpoint_path.parent.name)
@@ -880,3 +880,4 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+

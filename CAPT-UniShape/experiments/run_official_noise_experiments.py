@@ -14,11 +14,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_converter = importlib.import_module("scripts.build_official_npz_from_self_excel")
+_converter = importlib.import_module("experiments.build_official_npz_from_self_excel")
 _train = importlib.import_module("train")
 _models = importlib.import_module("models")
 build_npz = _converter.build_npz
@@ -171,7 +171,7 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     data_root.mkdir(parents=True, exist_ok=True)
 
-    clean_npz = data_root / f"self_seed{args.seed}_{args.ratio}.npz"
+    clean_npz = data_root / f"official_self_stack_impedance_eis_w{args.window_size}_{args.ratio}_clean.npz"
     print(f"\n=== 构建干净数据: train/test={args.ratio.replace('_', ':')} ===", flush=True)
     build_npz(
         excel_path=ROOT / args.excel,
@@ -245,3 +245,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

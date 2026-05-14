@@ -125,7 +125,7 @@ def build_datasets_from_npz(
         test_ds = FuelCellNPZDataset(data_path, test_idx) if len(test_idx) > 0 else None
         return FuelCellNPZDataset(data_path, train_idx), FuelCellNPZDataset(data_path, val_idx), test_ds
     raise ValueError(
-        "NPZ data must contain an explicit split array. Rebuild data with scripts/build_official_npz_from_self_excel.py "
+        "NPZ data must contain an explicit split array. Rebuild data with experiments/build_official_npz_from_self_excel.py "
         "to avoid silent random splits and val/test protocol drift."
     )
 
@@ -1177,3 +1177,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

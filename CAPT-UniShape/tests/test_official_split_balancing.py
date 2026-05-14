@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from scripts.build_official_npz_from_self_excel import _split_quality
+from experiments.build_official_npz_from_self_excel import _split_quality
 
 
 class OfficialSplitBalancingTests(unittest.TestCase):
@@ -119,3 +119,4 @@ class OfficialSplitBalancingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -10,7 +10,7 @@ import numpy as np
 if importlib.util.find_spec("torch") is None:
     raise unittest.SkipTest("torch is required to import the experiment runner")
 
-from scripts.run_official_baseline_experiments import _make_nested_train_subset_npzs
+from experiments.run_official_baseline_experiments import _make_nested_train_subset_npzs
 
 
 class NestedFixedSplitTests(unittest.TestCase):
@@ -79,3 +79,4 @@ class NestedFixedSplitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -18,73 +18,77 @@ if str(ROOT) not in sys.path:
 
 _train = importlib.import_module("train")
 _evaluate = importlib.import_module("evaluate")
-_snr = importlib.import_module("scripts.refresh_snr_noise_results")
+_snr = importlib.import_module("experiments.refresh_snr_noise_results")
 load_config = _train.load_config
 run_training = _train.run_training
 run_evaluation = _evaluate.run_evaluation
 write_test_subset_with_snr_noise = _snr.write_test_subset_with_snr_noise
+noise_seed_for_snr = _snr.noise_seed_for_snr
 
 DEFAULT_ABLATION_VARIANTS = ["full_rbf", "no_rbf", "no_kan_fusion", "static_prototype", "no_condition_input"]
 DEFAULT_FULL_METRICS_PATH = ""
-DEFAULT_ABLATION_SNR_DBS = [40.0, 30.0, 25.0, 20.0]
+DEFAULT_ABLATION_SNR_DBS = [30.0, 20.0, 10.0]
+DEFAULT_SNR_NOISE_SEEDS = [44, 45, 46]
 DEFAULT_NOISE_TARGETS = ["x_op", "x_eis", "x_cond"]
+ABLATION_CONFIG = "configs/ablation.yaml"
 
 ABLATIONS: dict[str, dict[str, Any]] = {
     "full_rbf": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "description": "完整模型：官方 UniShape + EIS + 工况 + Residual KAN-Fusion + 动态 RBF 原型",
     },
     "no_rbf": {
-        "config": "configs/proposed_no_rbf.yaml",
+        "config": ABLATION_CONFIG,
+        "overrides": {"model_name": "official_capt_unishape_kanfusion_no_rbf", "use_rbf_head": False},
         "description": "E：去掉 RBF 动态原型头，使用 MLP 分类器",
     },
     "fixed_equal_fusion": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "overrides": {"use_condition_gating": False},
         "description": "B：去掉工况门控 g_op/g_eis，改为固定等权直接相加",
     },
     "no_kan_fusion": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "overrides": {"use_residual_kan_fusion": False},
         "description": "C：关闭 Residual KAN 分支，只保留融合 MLP",
     },
     "no_film": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "overrides": {"use_film_modulation": False},
         "description": "D：关闭 FiLM 工况调制，固定 gamma=1、beta=0",
     },
     "static_prototype": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "overrides": {"use_condition_transport": False},
         "description": "关闭工况感知 prototype transport，只使用静态原型",
     },
     "no_transport_reg": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "overrides": {"alpha_transport": 0.0},
         "description": "去掉原型迁移幅值正则",
     },
     "no_separation_reg": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "overrides": {"alpha_sep": 0.0},
         "description": "去掉原型分离正则",
     },
     "no_eis_input": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "data_zero": ["x_eis"],
         "description": "置零 EIS 分支，验证 EIS 输入贡献",
     },
     "no_condition_input": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "data_zero": ["x_cond"],
         "description": "置零工况向量，验证工况建模贡献",
     },
     "stack_only": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "data_zero": ["x_eis", "x_cond"],
         "description": "仅保留电堆运行分支",
     },
     "eis_cond_only": {
-        "config": "configs/proposed.yaml",
+        "config": ABLATION_CONFIG,
         "data_zero": ["x_op"],
         "description": "去掉电堆运行分支，仅保留 EIS + 工况",
     },
@@ -186,6 +190,8 @@ def _snr_result_row(
     variant: str,
     description: str,
     snr_db: str,
+    noise_seed: Any,
+    n_noise_seeds: Any,
     actual_snr_db_mean: Any,
     noise_targets: list[str],
     zeroed_inputs: list[str],
@@ -204,6 +210,8 @@ def _snr_result_row(
         "variant": variant,
         "description": description,
         "snr_db": snr_db,
+        "noise_seed": noise_seed,
+        "n_noise_seeds": n_noise_seeds,
         "actual_snr_db_mean": actual_snr_db_mean,
         "noise_targets": "+".join(noise_targets),
         "zeroed_inputs": "+".join(zeroed_inputs),
@@ -226,6 +234,8 @@ def _paper_snr_row(row: dict[str, Any]) -> dict[str, Any]:
         "variant": row["variant"],
         "description": row["description"],
         "snr_db": row["snr_db"],
+        "noise_seed": row.get("noise_seed", ""),
+        "n_noise_seeds": row.get("n_noise_seeds", ""),
         "actual_snr_db_mean": "" if actual_snr == "" else f"{_safe_float(actual_snr):.4f}",
         "noise_targets": row["noise_targets"],
         "zeroed_inputs": row["zeroed_inputs"],
@@ -239,6 +249,43 @@ def _paper_snr_row(row: dict[str, Any]) -> dict[str, Any]:
         "parameter_count": row["parameter_count"],
         "metrics_path": row["metrics_path"],
     }
+
+
+def _mean_snr_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    group_order: list[tuple[str, str]] = []
+    for row in rows:
+        if str(row.get("snr_db", "")) == "clean":
+            output.append(dict(row))
+            continue
+        key = (str(row.get("variant", "")), str(row.get("snr_db", "")))
+        if key not in grouped:
+            grouped[key] = []
+            group_order.append(key)
+        grouped[key].append(row)
+
+    mean_fields = [
+        "actual_snr_db_mean",
+        "test_accuracy",
+        "accuracy_drop",
+        "test_macro_f1",
+        "macro_f1_drop",
+        "test_weighted_f1",
+        "weighted_f1_drop",
+        "test_inference_ms",
+    ]
+    for key in group_order:
+        group = grouped[key]
+        first = dict(group[0])
+        for field in mean_fields:
+            first[field] = sum(_safe_float(row.get(field)) for row in group) / len(group)
+        first["noise_seed"] = "mean"
+        first["n_noise_seeds"] = len(group)
+        first["data_path"] = "mean_of_noise_seed_npzs"
+        first["metrics_path"] = "mean_of_noise_seed_metrics"
+        output.append(first)
+    return output
 
 
 def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -285,6 +332,8 @@ def run_snr_ablation_evaluation(args: argparse.Namespace) -> None:
                 variant=variant,
                 description=description,
                 snr_db="clean",
+                noise_seed="",
+                n_noise_seeds="",
                 actual_snr_db_mean="",
                 noise_targets=_active_noise_targets(spec, requested_targets),
                 zeroed_inputs=zero_keys,
@@ -299,44 +348,51 @@ def run_snr_ablation_evaluation(args: argparse.Namespace) -> None:
             raise ValueError(f"{variant} 没有可加噪输入；requested_targets={requested_targets}, zero_keys={zero_keys}")
         for snr_db in args.snr_dbs:
             label = _snr_token(float(snr_db))
-            noisy_npz = data_root / variant / f"snr_{label}dB.npz"
-            noise_summary = write_test_subset_with_snr_noise(
-                variant_clean_npz,
-                noisy_npz,
-                snr_db=float(snr_db),
-                noise_targets=active_targets,
-                seed=int(args.snr_seed) + int(round(float(snr_db) * 10.0)),
-            )
-            eval_dir = output_root / variant / f"snr_{label}dB"
-            print(f"=== SNR 消融评估: {variant} {label}dB ===", flush=True)
-            run_evaluation(
-                str(ROOT / str(spec["config"])),
-                str(noisy_npz),
-                str(checkpoint_path),
-                str(eval_dir),
-                split="test",
-                config_overrides=_variant_overrides(spec),
-            )
-            rows.append(
-                _snr_result_row(
-                    variant=variant,
-                    description=description,
-                    snr_db=label,
-                    actual_snr_db_mean=float(noise_summary["actual_snr_db_mean"]),
+            for noise_seed in args.snr_noise_seeds:
+                noisy_npz = data_root / variant / f"seed_{int(noise_seed)}" / f"snr_{label}dB.npz"
+                noise_summary = write_test_subset_with_snr_noise(
+                    variant_clean_npz,
+                    noisy_npz,
+                    snr_db=float(snr_db),
                     noise_targets=active_targets,
-                    zeroed_inputs=zero_keys,
-                    data_path=noisy_npz,
-                    metrics_path=eval_dir / "metrics.json",
-                    clean_metrics=clean_metrics,
+                    seed=noise_seed_for_snr(int(noise_seed), float(snr_db)),
                 )
-            )
+                eval_dir = output_root / variant / f"seed_{int(noise_seed)}" / f"snr_{label}dB"
+                print(f"=== SNR 消融评估: {variant} {label}dB seed={int(noise_seed)} ===", flush=True)
+                run_evaluation(
+                    str(ROOT / str(spec["config"])),
+                    str(noisy_npz),
+                    str(checkpoint_path),
+                    str(eval_dir),
+                    split="test",
+                    config_overrides=_variant_overrides(spec),
+                )
+                rows.append(
+                    _snr_result_row(
+                        variant=variant,
+                        description=description,
+                        snr_db=label,
+                        noise_seed=int(noise_seed),
+                        n_noise_seeds=1,
+                        actual_snr_db_mean=float(noise_summary["actual_snr_db_mean"]),
+                        noise_targets=active_targets,
+                        zeroed_inputs=zero_keys,
+                        data_path=noisy_npz,
+                        metrics_path=eval_dir / "metrics.json",
+                        clean_metrics=clean_metrics,
+                    )
+                )
 
+    detail_summary_path = output_root / "summary_by_seed.csv"
     summary_path = output_root / "summary.csv"
     paper_summary_path = ROOT / args.snr_summary_path
-    _write_rows(summary_path, [{key: _format_summary_value(value) for key, value in row.items()} for row in rows])
-    _write_rows(paper_summary_path, [_paper_snr_row(row) for row in rows])
-    print(f"\n已写入 SNR 消融汇总: {summary_path}", flush=True)
-    print(f"已写入论文口径 SNR 消融表: {paper_summary_path}", flush=True)
+    mean_rows = _mean_snr_rows(rows)
+    _write_rows(detail_summary_path, [{key: _format_summary_value(value) for key, value in row.items()} for row in rows])
+    _write_rows(summary_path, [{key: _format_summary_value(value) for key, value in row.items()} for row in mean_rows])
+    _write_rows(paper_summary_path, [_paper_snr_row(row) for row in mean_rows])
+    print(f"\n已写入逐 seed SNR 消融汇总: {detail_summary_path}", flush=True)
+    print(f"已写入 3 seed 均值 SNR 消融汇总: {summary_path}", flush=True)
+    print(f"已写入论文口径 3 seed 均值 SNR 消融表: {paper_summary_path}", flush=True)
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -365,7 +421,8 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--snr-summary-path", default="results/消融实验SNR新表.csv")
     parser.add_argument("--snr-dbs", nargs="+", type=float, default=DEFAULT_ABLATION_SNR_DBS)
     parser.add_argument("--noise-targets", nargs="+", default=DEFAULT_NOISE_TARGETS, choices=DEFAULT_NOISE_TARGETS)
-    parser.add_argument("--snr-seed", type=int, default=44)
+    parser.add_argument("--snr-noise-seeds", nargs="+", type=int, default=DEFAULT_SNR_NOISE_SEEDS)
+    parser.add_argument("--snr-seed", type=int, default=44, help=argparse.SUPPRESS)
     return parser.parse_args(args)
 
 
@@ -430,3 +487,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

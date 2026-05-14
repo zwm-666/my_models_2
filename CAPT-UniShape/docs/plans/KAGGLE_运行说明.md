@@ -117,7 +117,7 @@ else:
 
 os.chdir(work_dir)
 print('当前目录:', os.getcwd())
-print('baseline脚本存在:', Path('scripts/run_official_baseline_experiments.py').exists())
+print('baseline脚本存在:', Path('experiments/run_official_baseline_experiments.py').exists())
 ```
 
 然后进入项目目录：
@@ -190,11 +190,11 @@ shutil.copytree(SRC, DST)
 # 切换到工作目录
 os.chdir(DST)
 print("当前目录:", os.getcwd())
-print("是否存在 scripts/run_official_baseline_experiments.py:",
+print("是否存在 experiments/run_official_baseline_experiments.py:",
       (DST / "scripts" / "run_official_baseline_experiments.py").exists())
 
 # 运行官方 baseline 脚本
-!python scripts/run_official_baseline_experiments.py \
+!python experiments/run_official_baseline_experiments.py \
   --ratios 8_2 7_3 6_4 5_5 \
   --models proposed logreg svm random_forest mlp cnn1d lstm transformer itransformer \
   --epochs 80 \
@@ -222,7 +222,7 @@ results/official_baseline_comparison/test_summary.csv
 运行：
 
 ```python
-!python scripts/build_official_npz_from_self_excel.py --excel "data/raw/测试数据.xlsx" --output "data/processed/official_self_stack_impedance_eis_w64_stable.npz" --window-size 64 --stride-train 16 --stride-eval 64 --eis-seq-len 128 --split-mode segment --segment-block-seconds 240 --op-source stack --test-size 0.2 --val-size 0.25
+!python experiments/build_official_npz_from_self_excel.py --excel "data/raw/测试数据.xlsx" --output "data/processed/official_self_stack_impedance_eis_w64_stable.npz" --window-size 64 --stride-train 16 --stride-eval 64 --eis-seq-len 128 --split-mode segment --segment-block-seconds 240 --op-source stack --test-size 0.2 --val-size 0.25
 ```
 
 主要输出：
@@ -239,7 +239,7 @@ data/processed/official_self_stack_impedance_eis_w64_stable.summary.json
 运行：
 
 ```python
-!python scripts/run_official_ablation_experiments.py --data data/processed/official_self_stack_impedance_eis_w64_stable.npz --variants full_rbf no_rbf no_kan_fusion static_prototype no_transport_reg no_separation_reg no_eis_input no_condition_input stack_only eis_cond_only --epochs 80 --patience 10 --output-root results/official_ablation --data-root data/processed/official_ablation
+!python experiments/run_official_ablation_experiments.py --data data/processed/official_self_stack_impedance_eis_w64_stable.npz --variants full_rbf no_rbf no_kan_fusion static_prototype no_transport_reg no_separation_reg no_eis_input no_condition_input stack_only eis_cond_only --epochs 80 --patience 10 --output-root results/official_ablation --data-root data/processed/official_ablation
 ```
 
 主要结果：
@@ -255,7 +255,7 @@ results/official_ablation/summary.csv
 默认跑 8:2，一次训练干净模型，再只给测试集加噪声：
 
 ```python
-!python scripts/run_official_noise_experiments.py --ratio 8_2 --models rbf no_rbf --noise-stds 0.0 0.01 0.03 0.05 0.10 --epochs 80 --patience 10 --val-size 0.25 --stride-eval 64 --segment-block-seconds 240 --output-root results/official_noise_experiments --data-root data/processed/official_noise_experiments
+!python experiments/run_official_noise_experiments.py --ratio 8_2 --models rbf no_rbf --noise-stds 0.0 0.01 0.03 0.05 0.10 --epochs 80 --patience 10 --val-size 0.25 --stride-eval 64 --segment-block-seconds 240 --output-root results/official_noise_experiments --data-root data/processed/official_noise_experiments
 ```
 
 主要结果：
@@ -309,13 +309,13 @@ figures/official_summaries/official_noise_summary.png
 例如先跑传统机器学习：
 
 ```python
-!python scripts/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models logreg svm random_forest --val-size 0.25 --stride-eval 64 --segment-block-seconds 240 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
+!python experiments/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models logreg svm random_forest --val-size 0.25 --stride-eval 64 --segment-block-seconds 240 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
 ```
 
 再跑深度学习和 Transformer：
 
 ```python
-!python scripts/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models proposed mlp cnn1d lstm transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 64 --segment-block-seconds 240 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
+!python experiments/run_official_baseline_experiments.py --ratios 8_2 7_3 6_4 5_5 --models proposed mlp cnn1d lstm transformer itransformer --epochs 80 --patience 10 --val-size 0.25 --stride-eval 64 --segment-block-seconds 240 --output-root results/official_baseline_comparison --data-root data/processed/official_baseline_comparison
 ```
 
 注意：新版脚本会重写 `results/official_baseline_comparison/summary.csv`，不再追加旧行。要完全重跑并清空旧模型目录时，可以先删除旧结果：
@@ -358,3 +358,4 @@ data/raw/测试数据.xlsx
 2. 到 Kaggle Dataset 页面点击 **New Version**。
 3. 上传新 zip。
 4. Notebook 中刷新 Dataset 版本后重新解压运行。
+

@@ -8,7 +8,7 @@ import numpy as np
 
 class FeatureEmbeddingVisualizationTests(unittest.TestCase):
     def test_split_indices_from_npz_selects_named_split(self) -> None:
-        from scripts.plot_feature_embeddings import split_indices_from_npz
+        from experiments.plot_feature_embeddings import split_indices_from_npz
 
         data = {"split": np.array([0, 2, 1, 2, 0], dtype=np.int64)}
 
@@ -18,7 +18,7 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
         self.assertEqual(split_indices_from_npz(data, "all").tolist(), [0, 1, 2, 3, 4])
 
     def test_raw_feature_matrix_concatenates_modalities_for_same_indices(self) -> None:
-        from scripts.plot_feature_embeddings import raw_feature_matrix
+        from experiments.plot_feature_embeddings import raw_feature_matrix
 
         data = {
             "x_op": np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3),
@@ -39,7 +39,7 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
         self.assertTrue(np.array_equal(features[0], expected))
 
     def test_reduce_features_keeps_two_columns_with_small_sample_count(self) -> None:
-        from scripts.plot_feature_embeddings import reduce_features
+        from experiments.plot_feature_embeddings import reduce_features
 
         features = np.array(
             [
@@ -56,14 +56,14 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
         self.assertTrue(np.isfinite(reduced).all())
 
     def test_axis_labels_name_the_embedding_method_not_fake_raw_features(self) -> None:
-        from scripts.plot_feature_embeddings import embedding_axis_labels
+        from experiments.plot_feature_embeddings import embedding_axis_labels
 
         self.assertEqual(embedding_axis_labels("tsne"), ("t-SNE 1", "t-SNE 2"))
         self.assertEqual(embedding_axis_labels("umap"), ("UMAP 1", "UMAP 2"))
         self.assertEqual(embedding_axis_labels("pca"), ("PC1", "PC2"))
 
     def test_panel_titles_describe_real_feature_sources(self) -> None:
-        from scripts.plot_feature_embeddings import panel_title
+        from experiments.plot_feature_embeddings import panel_title
 
         self.assertEqual(panel_title("raw"), "(a) Raw input features")
         self.assertEqual(panel_title("raw_source"), "(a) Raw source features")
@@ -74,7 +74,7 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
     def test_raw_self_window_features_keep_excel_physical_values(self) -> None:
         import pandas as pd
 
-        from scripts.plot_feature_embeddings import build_raw_self_window_feature_arrays
+        from experiments.plot_feature_embeddings import build_raw_self_window_feature_arrays
 
         stack_cols = ["电堆总电压", "电堆总电流", "电堆功率"]
         cond_cols = [
@@ -128,7 +128,7 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
     def test_official_builder_accepts_label_alias_and_maps_fault_names(self) -> None:
         import pandas as pd
 
-        from scripts.build_official_npz_from_self_excel import LABEL_COL, _prepare_label_column
+        from experiments.build_official_npz_from_self_excel import LABEL_COL, _prepare_label_column
 
         frame = pd.DataFrame({"label": ["正常", "过湿", "水淹", "过干", "膜干"]})
 
@@ -142,7 +142,7 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
     def test_raw_excel_all_numeric_mode_uses_supplemental_numeric_columns(self) -> None:
         import pandas as pd
 
-        from scripts.plot_feature_embeddings import raw_feature_columns_for_mode
+        from experiments.plot_feature_embeddings import raw_feature_columns_for_mode
 
         frame = pd.DataFrame(
             {
@@ -159,26 +159,26 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
         self.assertEqual(cols, ["总阻抗", "电堆总电压", "FC系统入口高压"])
 
     def test_parse_feature_keys_accepts_plus_separated_aux_features(self) -> None:
-        from scripts.plot_feature_embeddings import parse_feature_keys
+        from experiments.plot_feature_embeddings import parse_feature_keys
 
         self.assertEqual(parse_feature_keys("z_op+z_eis"), ["z_op", "z_eis"])
         self.assertEqual(parse_feature_keys("h"), ["h"])
 
     def test_display_panel_title_wraps_long_titles(self) -> None:
-        from scripts.plot_feature_embeddings import display_panel_title
+        from experiments.plot_feature_embeddings import display_panel_title
 
         title = "(c) UniShape features before shape-aware adapter"
 
         self.assertIn("\n", display_panel_title(title, width=32))
 
     def test_compact_panel_label_keeps_only_subplot_marker(self) -> None:
-        from scripts.plot_feature_embeddings import compact_panel_label
+        from experiments.plot_feature_embeddings import compact_panel_label
 
         self.assertEqual(compact_panel_label("(a) Raw input features"), "(a)")
         self.assertEqual(compact_panel_label("(d) UniShape final features after shape-aware adapter"), "(d)")
 
     def test_panel_caption_text_lists_full_meanings(self) -> None:
-        from scripts.plot_feature_embeddings import panel_caption_text
+        from experiments.plot_feature_embeddings import panel_caption_text
 
         captions = panel_caption_text(
             [
@@ -194,7 +194,7 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
         self.assertIn("\n", captions)
 
     def test_baseline_shape_dataset_uses_npz_shapes_without_train_split(self) -> None:
-        from scripts.plot_feature_embeddings import baseline_shape_dataset
+        from experiments.plot_feature_embeddings import baseline_shape_dataset
 
         data = {
             "x_op": np.zeros((3, 2, 8), dtype=np.float32),
@@ -213,8 +213,8 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
             self.skipTest("torch is not installed in this Python environment")
         import torch
 
-        from scripts.plot_feature_embeddings import extract_torch_baseline_features
-        from scripts.run_official_baseline_experiments import MLPBaseline
+        from experiments.plot_feature_embeddings import extract_torch_baseline_features
+        from experiments.run_official_baseline_experiments import MLPBaseline
 
         model = MLPBaseline(input_dim=7, hidden_dim=5, num_classes=3, dropout=0.0)
         model.eval()
@@ -229,3 +229,4 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

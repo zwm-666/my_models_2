@@ -65,17 +65,18 @@ class ResidualKANFusionTests(unittest.TestCase):
 
 class AblationSwitchTests(unittest.TestCase):
     def test_official_ablation_default_variants_match_required_table(self) -> None:
-        from scripts.run_official_ablation_experiments import ABLATIONS, DEFAULT_ABLATION_VARIANTS
+        from experiments.run_official_ablation_experiments import ABLATIONS, DEFAULT_ABLATION_VARIANTS
 
         self.assertEqual(
             DEFAULT_ABLATION_VARIANTS,
             ["full_rbf", "no_rbf", "no_kan_fusion", "static_prototype", "no_condition_input"],
         )
-        self.assertEqual(ABLATIONS["full_rbf"]["config"], "configs/proposed.yaml")
-        self.assertEqual(ABLATIONS["no_rbf"]["config"], "configs/proposed_no_rbf.yaml")
+        self.assertEqual({spec["config"] for spec in ABLATIONS.values()}, {"configs/ablation.yaml"})
+        self.assertEqual(ABLATIONS["no_rbf"]["overrides"]["model_name"], "official_capt_unishape_kanfusion_no_rbf")
+        self.assertFalse(ABLATIONS["no_rbf"]["overrides"]["use_rbf_head"])
 
     def test_official_ablation_metric_row_excludes_class0_fields(self) -> None:
-        from scripts.run_official_ablation_experiments import _copy_existing_metric_row
+        from experiments.run_official_ablation_experiments import _copy_existing_metric_row
 
         with TemporaryDirectory() as tmpdir:
             metrics_path = Path(tmpdir) / "metrics.json"
@@ -107,24 +108,98 @@ class AblationSwitchTests(unittest.TestCase):
         self.assertNotIn("class0_f1", row)
 
     def test_official_ablation_default_data_points_to_updated_self_dataset(self) -> None:
-        from scripts.run_official_ablation_experiments import parse_args
+        from experiments.run_official_ablation_experiments import parse_args
 
         args = parse_args([])
 
         self.assertEqual(args.data, "data/processed/self_seed44_8_2.npz")
 
     def test_snr_eval_args_default_to_current_six_four_artifacts(self) -> None:
-        from scripts.run_official_ablation_experiments import parse_args
+        from experiments.run_official_ablation_experiments import parse_args
 
         args = parse_args(["--snr-eval-only"])
 
         self.assertTrue(args.snr_eval_only)
         self.assertEqual(args.reuse_checkpoints_root, "results/current_ablation_updated_dataset_seed44_6_4")
         self.assertEqual(args.snr_output_root, "results/current_ablation_snr_updated_dataset_seed44_6_4")
-        self.assertEqual(args.snr_dbs, [40.0, 30.0, 25.0, 20.0])
+        self.assertEqual(args.snr_dbs, [30.0, 20.0, 10.0])
+        self.assertEqual(args.snr_noise_seeds, [44, 45, 46])
+
+    def test_mean_snr_rows_average_only_noisy_repeats(self) -> None:
+        from experiments.run_official_ablation_experiments import _mean_snr_rows
+
+        rows = [
+            {
+                "variant": "full_rbf",
+                "description": "完整模型",
+                "snr_db": "clean",
+                "noise_seed": "",
+                "actual_snr_db_mean": "",
+                "noise_targets": "x_op+x_eis+x_cond",
+                "zeroed_inputs": "",
+                "test_accuracy": 1.0,
+                "accuracy_drop": 0.0,
+                "test_macro_f1": 1.0,
+                "macro_f1_drop": 0.0,
+                "test_weighted_f1": 1.0,
+                "weighted_f1_drop": 0.0,
+                "test_inference_ms": 10.0,
+                "parameter_count": 123,
+                "data_path": "clean.npz",
+                "metrics_path": "clean/metrics.json",
+            },
+            {
+                "variant": "full_rbf",
+                "description": "完整模型",
+                "snr_db": "30",
+                "noise_seed": 44,
+                "actual_snr_db_mean": 30.0,
+                "noise_targets": "x_op+x_eis+x_cond",
+                "zeroed_inputs": "",
+                "test_accuracy": 0.9,
+                "accuracy_drop": 0.1,
+                "test_macro_f1": 0.8,
+                "macro_f1_drop": 0.2,
+                "test_weighted_f1": 0.85,
+                "weighted_f1_drop": 0.15,
+                "test_inference_ms": 10.0,
+                "parameter_count": 123,
+                "data_path": "seed44.npz",
+                "metrics_path": "seed44/metrics.json",
+            },
+            {
+                "variant": "full_rbf",
+                "description": "完整模型",
+                "snr_db": "30",
+                "noise_seed": 45,
+                "actual_snr_db_mean": 30.0,
+                "noise_targets": "x_op+x_eis+x_cond",
+                "zeroed_inputs": "",
+                "test_accuracy": 0.7,
+                "accuracy_drop": 0.3,
+                "test_macro_f1": 0.6,
+                "macro_f1_drop": 0.4,
+                "test_weighted_f1": 0.65,
+                "weighted_f1_drop": 0.35,
+                "test_inference_ms": 14.0,
+                "parameter_count": 123,
+                "data_path": "seed45.npz",
+                "metrics_path": "seed45/metrics.json",
+            },
+        ]
+
+        mean_rows = _mean_snr_rows(rows)
+
+        self.assertEqual(len(mean_rows), 2)
+        self.assertEqual(mean_rows[0]["snr_db"], "clean")
+        self.assertEqual(mean_rows[1]["noise_seed"], "mean")
+        self.assertEqual(mean_rows[1]["n_noise_seeds"], 2)
+        self.assertAlmostEqual(mean_rows[1]["test_accuracy"], 0.8)
+        self.assertAlmostEqual(mean_rows[1]["test_macro_f1"], 0.7)
+        self.assertAlmostEqual(mean_rows[1]["test_inference_ms"], 12.0)
 
     def test_snr_noise_targets_skip_zeroed_ablation_inputs(self) -> None:
-        from scripts.run_official_ablation_experiments import ABLATIONS, _active_noise_targets
+        from experiments.run_official_ablation_experiments import ABLATIONS, _active_noise_targets
 
         requested = ["x_op", "x_eis", "x_cond"]
 
@@ -268,3 +343,4 @@ class MultiSeedExperimentCLITests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

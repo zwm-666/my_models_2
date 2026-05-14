@@ -5,13 +5,15 @@ import math
 import unittest
 from pathlib import Path
 
+import joblib
 import numpy as np
 from openpyxl import Workbook, load_workbook
+from sklearn.feature_selection import VarianceThreshold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.svm import SVC
 
-from scripts import refresh_snr_noise_results as snr
+from experiments import refresh_snr_noise_results as snr
 
 
 class SnrNoiseRefreshTests(unittest.TestCase):
@@ -113,9 +115,9 @@ class SnrNoiseRefreshTests(unittest.TestCase):
         self.assertEqual(merged[0]["metrics_path"], "same_run_clean")
         self.assertEqual(float(merged[0]["test_accuracy"]), 1.0)
 
-    def test_cli_defaults_to_same_run_clean_source(self) -> None:
+    def test_cli_defaults_to_comparison_results_clean_source(self) -> None:
         args = snr.parse_args([])
-        self.assertEqual(args.clean_source, "reference")
+        self.assertEqual(args.clean_source, "comparison-results")
         self.assertEqual(args.summary_path, "results\\噪声对齐论文实验新表.csv")
 
     def test_compact_summary_uses_required_headers_and_four_decimals(self) -> None:
@@ -273,6 +275,45 @@ class SnrNoiseRefreshTests(unittest.TestCase):
             self.assertEqual(resolved_metrics, metrics_path)
             self.assertEqual(resolved_checkpoint, checkpoint_path)
 
+    def test_load_comparison_ml_model_artifact_requires_persisted_joblib(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaises(FileNotFoundError):
+                snr.load_comparison_ml_model_artifact(root, "svm")
+
+            model_dir = root / "svm"
+            model_dir.mkdir(parents=True)
+            model_path = model_dir / "model.joblib"
+            joblib.dump({"model": "sentinel"}, model_path)
+
+            loaded = snr.load_comparison_ml_model_artifact(root, "svm")
+            self.assertEqual(loaded["model"], "sentinel")
+
+    def test_resolve_comparison_torch_checkpoint_requires_best_ckpt(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaises(FileNotFoundError):
+                snr.resolve_comparison_torch_checkpoint(root, "transformer")
+
+            model_dir = root / "transformer"
+            model_dir.mkdir(parents=True)
+            checkpoint = model_dir / "best.ckpt"
+            checkpoint.write_bytes(b"ckpt")
+
+            self.assertEqual(snr.resolve_comparison_torch_checkpoint(root, "transformer"), checkpoint)
+
+    def test_comparison_torch_settings_preserves_comparison_yaml_values(self) -> None:
+        settings = snr.comparison_torch_settings({"hidden_dim": 8, "d_model": 8, "num_layers": 1, "dropout": 0.6})
+
+        self.assertEqual(settings["hidden_dim"], 8)
+        self.assertEqual(settings["d_model"], 8)
+        self.assertEqual(settings["num_layers"], 1)
+        self.assertEqual(settings["dropout"], 0.6)
+
     def test_noise_seed_matches_cli_example(self) -> None:
         self.assertEqual(snr.noise_seed_for_snr(44, 20.0), 44020000)
         self.assertEqual(snr.noise_seed_for_snr(44, 35.0), 44035000)
@@ -420,6 +461,49 @@ class SnrNoiseRefreshTests(unittest.TestCase):
 
                 gc.collect()
 
+    def test_update_workbook_snr_sheet_removes_legacy_class0_column(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "snr.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "SNR噪声对比"
+            worksheet.append(["模型", "SNR(dB)", "Accuracy", "Acc下降", "Macro-F1", "Macro下降", "Weighted-F1", "第0类 Recall", "推理时间(ms/sample)"])
+            worksheet.append(["旧模型", "clean", "100.00%", "0.00%", "100.00%", "0.00%", "100.00%", "100.00%", "1.000"])
+            workbook.save(workbook_path)
+            workbook.close()
+
+            snr.update_workbook_snr_sheet(
+                workbook_path,
+                [
+                    {
+                        "model": "itransformer",
+                        "snr_db": "clean",
+                        "test_accuracy": 0.8689,
+                        "accuracy_drop": 0.0,
+                        "test_macro_f1": 0.6105,
+                        "macro_f1_drop": 0.0,
+                        "test_weighted_f1": 0.8084,
+                        "test_inference_ms": 0.1,
+                    }
+                ],
+            )
+
+            saved = load_workbook(workbook_path, read_only=True)
+            try:
+                worksheet = saved["SNR噪声对比"]
+                headers = [worksheet.cell(1, column).value for column in range(1, worksheet.max_column + 1)]
+                values = [worksheet.cell(2, column).value for column in range(1, worksheet.max_column + 1)]
+            finally:
+                saved.close()
+
+            self.assertEqual(
+                headers,
+                ["模型", "SNR(dB)", "Accuracy", "Acc下降", "Macro-F1", "Macro下降", "Weighted-F1", "推理时间(ms/sample)"],
+            )
+            self.assertEqual(len(values), 8)
+
     def test_export_row_uses_percent_strings_with_two_decimals(self) -> None:
         row = snr.export_summary_row(
             {
@@ -493,6 +577,17 @@ excluded_models:
                 snr.load_model_order_from_current_comparison_config(config_path),
                 ["proposed", "logreg", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"],
             )
+
+    def test_parse_args_defaults_models_to_config_selection(self) -> None:
+        args = snr.parse_args([])
+
+        self.assertIsNone(args.models)
+
+    def test_select_models_for_run_defaults_to_available_config_order(self) -> None:
+        available = ["proposed", "logreg", "svm", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"]
+
+        self.assertEqual(snr.select_models_for_run(None, available), available)
+        self.assertEqual(snr.select_models_for_run(["mlp", "lstm", "svm"], available), ["mlp", "svm"])
 
     def test_load_reference_clean_rows_from_comparison_summaries(self) -> None:
         import tempfile
@@ -575,6 +670,173 @@ excluded_models:
             self.assertEqual(rows["svm"]["metrics_path"], "results\\baseline\\svm\\metrics.json")
             self.assertAlmostEqual(float(rows["proposed"]["test_macro_f1"]), 1.0)
             self.assertEqual(rows["proposed"]["metrics_path"], "results\\proposed\\8_2\\metrics.json")
+
+    def test_load_reference_clean_rows_from_comparison_summaries_uses_requested_ratio(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            baseline_summary = tmp / "test_summary.csv"
+            proposed_summary = tmp / "proposed_summary.csv"
+
+            with baseline_summary.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "ratio",
+                        "model",
+                        "accuracy",
+                        "macro_f1",
+                        "weighted_f1",
+                        "inference_ms",
+                        "parameter_count",
+                        "metrics_path",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "ratio": "8_2",
+                        "model": "cnn1d",
+                        "accuracy": "99.18%",
+                        "macro_f1": "98.79%",
+                        "weighted_f1": "99.19%",
+                        "inference_ms": "0.1106",
+                        "parameter_count": "1000",
+                        "metrics_path": "results\\baseline\\cnn1d\\8_2\\metrics.json",
+                    }
+                )
+                writer.writerow(
+                    {
+                        "ratio": "6_4",
+                        "model": "cnn1d",
+                        "accuracy": "80.33%",
+                        "macro_f1": "55.00%",
+                        "weighted_f1": "74.00%",
+                        "inference_ms": "0.1200",
+                        "parameter_count": "900",
+                        "metrics_path": "results\\baseline\\cnn1d\\6_4\\metrics.json",
+                    }
+                )
+            proposed_summary.write_text(
+                "ratio,output_dir,test_accuracy,test_macro_f1,test_weighted_f1,test_inference_ms,parameter_count,metrics_json,selected_ckpt\n",
+                encoding="utf-8",
+            )
+
+            rows = snr.load_reference_clean_rows_from_comparison_summaries(
+                baseline_summary_path=baseline_summary,
+                proposed_summary_path=proposed_summary,
+                model_order=["cnn1d"],
+                data_path=tmp / "clean.npz",
+                ratio_key="6_4",
+                ratio_label="6:4",
+            )
+
+            self.assertEqual(rows["cnn1d"]["ratio"], "6:4")
+            self.assertAlmostEqual(float(rows["cnn1d"]["test_accuracy"]), 0.8033)
+            self.assertEqual(rows["cnn1d"]["metrics_path"], "results\\baseline\\cnn1d\\6_4\\metrics.json")
+
+    def test_load_clean_rows_from_comparison_result_csv_uses_requested_ratio(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            comparison_results = tmp / "对比实验结果.csv"
+            with comparison_results.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "ratio",
+                        "model",
+                        "accuracy",
+                        "macro_f1",
+                        "weighted_f1",
+                        "inference_ms",
+                        "parameter_count",
+                        "result_dir",
+                        "metrics_path",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "ratio": "8_2",
+                        "model": "itransformer",
+                        "accuracy": "100.00%",
+                        "macro_f1": "100.00%",
+                        "weighted_f1": "100.00%",
+                        "inference_ms": "0.1",
+                        "parameter_count": "214275",
+                        "result_dir": "bad",
+                        "metrics_path": "bad/metrics.json",
+                    }
+                )
+                writer.writerow(
+                    {
+                        "ratio": "6_4",
+                        "model": "itransformer",
+                        "accuracy": "86.89%",
+                        "macro_f1": "60.69%",
+                        "weighted_f1": "80.88%",
+                        "inference_ms": "0.64",
+                        "parameter_count": "3539",
+                        "result_dir": "results\\baseline\\6_4\\itransformer",
+                        "metrics_path": "results\\baseline\\6_4\\itransformer\\metrics.json",
+                    }
+                )
+
+            rows = snr.load_clean_rows_from_comparison_result_csv(
+                comparison_results_path=comparison_results,
+                model_order=["itransformer"],
+                data_path=tmp / "clean.npz",
+                ratio_key="6_4",
+                ratio_label="6:4",
+            )
+
+            self.assertEqual(rows["itransformer"]["ratio"], "6:4")
+            self.assertAlmostEqual(float(rows["itransformer"]["test_accuracy"]), 0.8689)
+            self.assertAlmostEqual(float(rows["itransformer"]["test_macro_f1"]), 0.6069)
+            self.assertEqual(int(rows["itransformer"]["parameter_count"]), 3539)
+
+    def test_assert_clean_rows_match_reference_rejects_wrong_itransformer(self) -> None:
+        reference = {
+            "itransformer": {
+                "test_accuracy": 0.8689,
+                "test_macro_f1": 0.6069,
+                "test_weighted_f1": 0.8088,
+                "parameter_count": 3539,
+            }
+        }
+        candidate = {
+            "itransformer": {
+                "test_accuracy": 1.0,
+                "test_macro_f1": 1.0,
+                "test_weighted_f1": 1.0,
+                "parameter_count": 214275,
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "itransformer"):
+            snr.assert_clean_rows_match_reference(
+                reference_rows=reference,
+                candidate_rows=candidate,
+                model_order=["itransformer"],
+            )
+
+    def test_archive_existing_summary_moves_new_table_to_old_table(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            summary_path = tmp / "噪声对齐论文实验新表.csv"
+            old_path = tmp / "噪声对齐论文实验旧表.csv"
+            summary_path.write_text("bad itransformer table", encoding="utf-8")
+            old_path.write_text("previous old table", encoding="utf-8")
+
+            snr.archive_existing_summary(summary_path, old_path)
+
+            self.assertFalse(summary_path.exists())
+            self.assertEqual(old_path.read_text(encoding="utf-8"), "bad itransformer table")
 
     def test_load_reference_clean_rows_from_comparison_summaries_derives_proposed_paths_from_output_dir(self) -> None:
         import tempfile
@@ -818,6 +1080,7 @@ excluded_models:
             "svm",
             {
                 "use_scaler": True,
+                "variance_threshold": 0.0001,
                 "pca_components": 8,
                 "kernel": "rbf",
                 "C": 1.0,
@@ -840,7 +1103,9 @@ excluded_models:
         )
 
         self.assertIsInstance(svm_model, Pipeline)
-        self.assertEqual(list(svm_model.named_steps.keys()), ["scaler", "pca", "classifier"])
+        self.assertEqual(list(svm_model.named_steps.keys()), ["variance", "scaler", "pca", "classifier"])
+        self.assertIsInstance(svm_model.named_steps["variance"], VarianceThreshold)
+        self.assertAlmostEqual(float(svm_model.named_steps["variance"].threshold), 0.0001)
         self.assertIsInstance(svm_model.named_steps["classifier"], SVC)
         self.assertEqual(svm_model.named_steps["classifier"].kernel, "rbf")
 
@@ -869,16 +1134,63 @@ excluded_models:
         self.assertGreaterEqual(float(baselines["mlp"]["dropout"]), 0.35)
         self.assertGreaterEqual(int(baselines["mlp"]["epochs"]), 18)
 
-        self.assertGreaterEqual(int(baselines["transformer"]["d_model"]), 16)
+        self.assertEqual(int(baselines["transformer"]["d_model"]), 8)
         self.assertEqual(int(baselines["transformer"]["num_layers"]), 1)
         self.assertGreaterEqual(float(baselines["transformer"]["dropout"]), 0.3)
         self.assertGreaterEqual(int(baselines["transformer"]["epochs"]), 20)
 
-        self.assertGreaterEqual(int(baselines["itransformer"]["d_model"]), 16)
+        self.assertEqual(int(baselines["itransformer"]["d_model"]), 8)
         self.assertEqual(int(baselines["itransformer"]["num_layers"]), 1)
         self.assertGreaterEqual(float(baselines["itransformer"]["dropout"]), 0.35)
         self.assertEqual(str(baselines["itransformer"]["class_weighting"]).lower(), "none")
 
+    def test_current_config_preserves_comparison_strength_for_6_4_cnn_and_transformer(self) -> None:
+        config = snr.load_current_comparison_config(
+            Path(__file__).resolve().parents[1] / "configs" / "current_comparison_models.yaml"
+        )
+
+        cnn1d = snr.resolve_model_run_settings(config, "cnn1d", ratio_key="6_4")
+        transformer = snr.resolve_model_run_settings(config, "transformer", ratio_key="6_4")
+        itransformer = snr.resolve_model_run_settings(config, "itransformer", ratio_key="6_4")
+
+        self.assertEqual(cnn1d["setting_name"], "modest_torch_cnn1d")
+        self.assertEqual(int(cnn1d["hidden_dim"]), 6)
+        self.assertEqual(int(cnn1d["epochs"]), 18)
+        self.assertAlmostEqual(float(cnn1d["dropout"]), 0.4)
+        self.assertEqual(str(cnn1d["class_weighting"]).lower(), "sqrt_balanced")
+
+        self.assertEqual(transformer["setting_name"], "modest_torch_transformer")
+        self.assertEqual(int(transformer["d_model"]), 8)
+        self.assertEqual(int(transformer["epochs"]), 20)
+        self.assertAlmostEqual(float(transformer["dropout"]), 0.35)
+        self.assertEqual(str(transformer["class_weighting"]).lower(), "sqrt_balanced")
+
+        self.assertEqual(itransformer["setting_name"], "modest_torch_itransformer")
+        self.assertEqual(int(itransformer["d_model"]), 8)
+
+    def test_current_config_preserves_comparison_strength_for_6_4_traditional_ml(self) -> None:
+        config = snr.load_current_comparison_config(
+            Path(__file__).resolve().parents[1] / "configs" / "current_comparison_models.yaml"
+        )
+
+        logreg = snr.resolve_model_run_settings(config, "logreg", ratio_key="6_4")
+        svm = snr.resolve_model_run_settings(config, "svm", ratio_key="6_4")
+        random_forest = snr.resolve_model_run_settings(config, "random_forest", ratio_key="6_4")
+
+        self.assertNotIn("variance_threshold", logreg)
+        self.assertEqual(snr._resolve_pca_components(logreg["pca_components"]), 2)
+        self.assertLessEqual(float(logreg["C"]), 0.1)
+
+        self.assertNotIn("variance_threshold", svm)
+        self.assertEqual(snr._resolve_pca_components(svm["pca_components"]), 1)
+        self.assertLessEqual(float(svm["C"]), 0.05)
+
+        self.assertNotIn("variance_threshold", random_forest)
+        self.assertEqual(snr._resolve_pca_components(random_forest["pca_components"]), 4)
+        self.assertLessEqual(int(random_forest["max_depth"]), 3)
+        self.assertGreaterEqual(int(random_forest["min_samples_leaf"]), 5)
+
 
 if __name__ == "__main__":
     unittest.main()
+
