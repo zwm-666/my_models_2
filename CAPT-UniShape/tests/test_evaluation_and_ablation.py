@@ -74,7 +74,7 @@ class AblationSwitchTests(unittest.TestCase):
         self.assertEqual(ABLATIONS["full_rbf"]["config"], "configs/proposed.yaml")
         self.assertEqual(ABLATIONS["no_rbf"]["config"], "configs/proposed_no_rbf.yaml")
 
-    def test_official_ablation_can_read_full_metrics_row(self) -> None:
+    def test_official_ablation_metric_row_excludes_class0_fields(self) -> None:
         from scripts.run_official_ablation_experiments import _copy_existing_metric_row
 
         with TemporaryDirectory() as tmpdir:
@@ -101,8 +101,10 @@ class AblationSwitchTests(unittest.TestCase):
         self.assertEqual(row["variant"], "full_rbf")
         self.assertAlmostEqual(row["test_accuracy"], 1.0)
         self.assertAlmostEqual(row["test_macro_f1"], 0.9)
-        self.assertAlmostEqual(row["class0_recall"], 0.75)
         self.assertEqual(row["parameter_count"], 1234)
+        self.assertNotIn("class0_precision", row)
+        self.assertNotIn("class0_recall", row)
+        self.assertNotIn("class0_f1", row)
 
     def test_official_ablation_default_data_points_to_updated_self_dataset(self) -> None:
         from scripts.run_official_ablation_experiments import parse_args

@@ -109,7 +109,6 @@ def _make_data_variant(base_npz: Path, output_npz: Path, zero_keys: list[str]) -
 def _metric_row(variant: str, description: str, metrics_path: Path) -> dict[str, Any]:
     payload = json.loads(metrics_path.read_text(encoding="utf-8"))
     test_payload = payload.get("test", payload)
-    class0 = test_payload.get("classification_report", {}).get("0", {})
     return {
         "variant": variant,
         "description": description,
@@ -119,9 +118,6 @@ def _metric_row(variant: str, description: str, metrics_path: Path) -> dict[str,
         "test_accuracy": float(test_payload.get("accuracy", 0.0)),
         "test_macro_f1": float(test_payload.get("macro_f1", 0.0)),
         "test_weighted_f1": float(test_payload.get("weighted_f1", 0.0)),
-        "class0_precision": float(class0.get("precision", 0.0)),
-        "class0_recall": float(class0.get("recall", 0.0)),
-        "class0_f1": float(class0.get("f1-score", 0.0)),
         "test_inference_ms": float(test_payload.get("inference_time_per_sample_ms", 0.0)),
         "parameter_count": int(payload.get("parameter_count", 0)),
         "metrics_path": str(metrics_path),

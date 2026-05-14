@@ -1,0 +1,127 @@
+# Current comparison experiment configuration for updated processed dataset.
+# Data: data/processed/self_seed44_{8_2,7_3,6_4,5_5}.npz
+# Results: results/updated_dataset_ratio_and_baseline_comparison_summary_20260513
+
+dataset:
+  source_pattern: data/processed/self_seed44_{ratio}.npz
+  ratios: [8_2, 7_3, 6_4, 5_5]
+  seed: 44
+  refit_trainval: false
+
+proposed:
+  config_file: configs/proposed.yaml
+  model_name: official_capt_unishape_rbf_kanfusion
+  d_model: 128
+  hidden_dim: 256
+  fusion_hidden_dim: 256
+  dropout: 0.1
+  use_rbf_head: true
+  num_rbf_centers: 16
+  use_residual_kan_fusion: true
+  kan_bottleneck_dim: 32
+  kan_num_basis: 8
+  kan_lambda: 0.1
+  learnable_kan_lambda: true
+  channel_aggregation: attention
+  scale_len: 3
+  batch_size: 32
+  epochs: 80
+  patience: 10
+  min_delta: 0.0001
+  min_epochs_before_stop: 20
+  val_metric_smoothing: 3
+  class_weighting_default: sqrt_balanced
+  lr: 0.0001
+  weight_decay: 0.0001
+  checkpoint_selection: best_val
+  selection_score_default: macro_f1
+  ratio_overrides:
+    5_5:
+      output_dir: results/updated_dataset_proposed_ratio_comparison_20260513_seed44/5_5_logit_adjusted
+      class_weighting: logit_adjusted
+      selection_score: macro_f1_class0_recall
+
+baselines:
+  logreg:
+    setting_name: op_pca1_lightweight_logreg
+    feature_protocol: x_op only -> StandardScaler -> PCA(n_components=1)
+    classifier: LogisticRegression
+    C: 0.01
+    max_iter: 1000
+    class_weighting: none
+    random_state: 44
+  svm:
+    setting_name: pca1_lightweight_ml
+    feature_protocol: flattened input -> StandardScaler -> PCA(n_components=1)
+    classifier: LinearSVC
+    C: 0.02
+    max_iter: 5000
+    class_weighting: none
+    random_state: 44
+  random_forest:
+    setting_name: pca1_lightweight_ml
+    feature_protocol: flattened input -> StandardScaler -> PCA(n_components=1)
+    classifier: RandomForestClassifier
+    n_estimators: 40
+    max_depth: 1
+    min_samples_leaf: 5
+    max_features: sqrt
+    class_weighting: none
+    random_state: 44
+  mlp:
+    setting_name: balanced_light_torch
+    hidden_dim: 8
+    epochs: 12
+    patience: 2
+    min_epochs_before_stop: 3
+    dropout: 0.6
+    lr: 0.0005
+    weight_decay: 0.001
+    class_weighting: none
+    batch_size: 32
+  cnn1d:
+    setting_name: balanced_light_torch
+    hidden_dim: 8
+    epochs: 12
+    patience: 2
+    min_epochs_before_stop: 3
+    dropout: 0.6
+    lr: 0.0005
+    weight_decay: 0.001
+    class_weighting: none
+    batch_size: 32
+    ratio_overrides:
+      6_4:
+        setting_name: calibrated_light_cnn1d
+        hidden_dim: 6
+        epochs: 10
+        dropout: 0.65
+        lr: 0.0004
+        weight_decay: 0.002
+  transformer:
+    setting_name: balanced_light_torch
+    d_model: 8
+    num_layers: 1
+    epochs: 12
+    patience: 2
+    min_epochs_before_stop: 3
+    dropout: 0.6
+    lr: 0.0005
+    weight_decay: 0.001
+    class_weighting: none
+    batch_size: 32
+  itransformer:
+    setting_name: balanced_light_torch
+    d_model: 8
+    num_layers: 1
+    epochs: 12
+    patience: 2
+    min_epochs_before_stop: 3
+    dropout: 0.6
+    lr: 0.0005
+    weight_decay: 0.001
+    class_weighting: none
+    batch_size: 32
+
+excluded_models:
+  - lstm
