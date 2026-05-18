@@ -514,13 +514,29 @@ def _actual_snr_db(clean: np.ndarray[Any, Any], noisy: np.ndarray[Any, Any]) -> 
     return float(10.0 * math.log10(signal_power / noise_power))
 
 
+def _scale_noise_to_snr(
+    clean_array: np.ndarray[Any, Any],
+    noise: np.ndarray[Any, Any],
+    snr_db: float,
+) -> np.ndarray[Any, Any]:
+    signal_power = float(np.mean(np.square(clean_array.astype(np.float64))))
+    if signal_power <= 1e-12:
+        signal_power = 1.0
+    target_noise_power = signal_power / (10.0 ** (float(snr_db) / 10.0))
+    current_noise_power = float(np.mean(np.square(noise.astype(np.float64))))
+    return noise * math.sqrt(target_noise_power / max(current_noise_power, 1e-12))
+
+
 def write_test_subset_with_snr_noise(
     clean_npz: Path,
     output_npz: Path,
     snr_db: float,
     noise_targets: list[str],
     seed: int,
+    snr_scope: str = "global",
 ) -> dict[str, Any]:
+    if snr_scope not in {"global", "per_sample_modality"}:
+        raise ValueError(f"不支持 snr_scope={snr_scope!r}; 应为 global 或 per_sample_modality")
     with np.load(clean_npz) as data:
         if "split" not in data:
             raise ValueError(f"{clean_npz} 缺少 split 数组")
@@ -540,17 +556,21 @@ def write_test_subset_with_snr_noise(
 
     rng = np.random.default_rng(int(seed))
     actual_by_target: dict[str, float] = {}
+    sample_actual_by_target: dict[str, list[float]] = {}
     for key in noise_targets:
         if key not in payload:
             raise KeyError(f"{clean_npz} 中不存在可加噪字段 {key}")
         clean_array = payload[key].astype(np.float32, copy=True)
-        signal_power = float(np.mean(np.square(clean_array.astype(np.float64))))
-        if signal_power <= 1e-12:
-            signal_power = 1.0
-        target_noise_power = signal_power / (10.0 ** (float(snr_db) / 10.0))
         noise = rng.normal(loc=0.0, scale=1.0, size=clean_array.shape).astype(np.float32)
-        current_noise_power = float(np.mean(np.square(noise.astype(np.float64))))
-        noise *= math.sqrt(target_noise_power / max(current_noise_power, 1e-12))
+        if snr_scope == "per_sample_modality":
+            for sample_index in range(clean_array.shape[0]):
+                noise[sample_index] = _scale_noise_to_snr(clean_array[sample_index], noise[sample_index], float(snr_db))
+            sample_actual_by_target[key] = [
+                _actual_snr_db(clean_array[sample_index], clean_array[sample_index] + noise[sample_index])
+                for sample_index in range(clean_array.shape[0])
+            ]
+        else:
+            noise = _scale_noise_to_snr(clean_array, noise, float(snr_db)).astype(np.float32)
         noisy_array = clean_array + noise
         payload[key] = noisy_array.astype(np.float32)
         actual_by_target[key] = _actual_snr_db(clean_array, payload[key])
@@ -561,7 +581,9 @@ def write_test_subset_with_snr_noise(
         "source_npz": str(clean_npz),
         "output_npz": str(output_npz),
         "snr_db": float(snr_db),
+        "snr_scope": snr_scope,
         "target_actual_snr_db": actual_by_target,
+        "target_sample_actual_snr_db": sample_actual_by_target,
         "actual_snr_db_mean": float(np.mean(list(actual_by_target.values()))) if actual_by_target else float("nan"),
         "num_test_samples": int(test_idx.size),
     }
@@ -714,6 +736,86 @@ def write_export_summary(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     _write_csv_rows(path, (export_summary_row(row) for row in rows), EXPORT_FIELDNAMES)
 
 
+def build_snr_noise_jobs(
+    *,
+    data_root: Path,
+    snr_dbs: Iterable[float],
+    base_seed: int,
+    noise_repeats: int = 1,
+) -> list[dict[str, Any]]:
+    repeats = int(noise_repeats)
+    if repeats < 1:
+        raise ValueError("noise_repeats 必须 >= 1")
+    jobs: list[dict[str, Any]] = []
+    for snr_db in snr_dbs:
+        label = _snr_token(float(snr_db))
+        for repeat_index in range(repeats):
+            if repeats == 1:
+                npz_path = Path(data_root) / f"snr_{label}dB.npz"
+            else:
+                npz_path = Path(data_root) / f"snr_{label}dB" / f"seed_{repeat_index + 1}.npz"
+            jobs.append(
+                {
+                    "snr_db": float(snr_db),
+                    "snr_label": label,
+                    "repeat_index": repeat_index,
+                    "seed": noise_seed_for_snr(int(base_seed), float(snr_db)) + repeat_index,
+                    "npz_path": npz_path,
+                }
+            )
+    return jobs
+
+
+def aggregate_noise_repeat_rows(
+    rows: list[dict[str, Any]],
+    *,
+    aggregate_metrics_root: Path,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (str(row.get("model", "")), str(row.get("snr_db", "")), str(row.get("noise_targets", "")))
+        grouped.setdefault(key, []).append(row)
+
+    aggregate_metrics_root.mkdir(parents=True, exist_ok=True)
+    aggregate_rows: list[dict[str, Any]] = []
+    mean_keys = ["test_accuracy", "test_macro_f1", "test_weighted_f1", "test_inference_ms", "actual_snr_db_mean"]
+    drop_keys = ["accuracy_drop", "macro_f1_drop", "weighted_f1_drop"]
+    std_source_keys = ["test_accuracy", "test_macro_f1", "test_weighted_f1", "test_inference_ms"]
+    for (model, snr_label, _noise_targets), repeat_rows in grouped.items():
+        first = dict(repeat_rows[0])
+        aggregate = dict(first)
+        for key in mean_keys + drop_keys:
+            aggregate[key] = float(np.mean([_safe_float(row.get(key)) for row in repeat_rows]))
+        for key in std_source_keys:
+            aggregate[f"{key}_std"] = float(np.std([_safe_float(row.get(key)) for row in repeat_rows], ddof=0))
+        aggregate["data_path"] = ";".join(str(row.get("data_path", "")) for row in repeat_rows)
+        aggregate["metrics_path"] = str(aggregate_metrics_root / str(model) / f"snr_{snr_label}dB_summary.json")
+        aggregate["noise_repeat_count"] = int(len(repeat_rows))
+        aggregate["noise_repeat_metrics_paths"] = ";".join(str(row.get("metrics_path", "")) for row in repeat_rows)
+        metrics_path = Path(aggregate["metrics_path"])
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_payload = {
+            "test": {
+                "accuracy": float(aggregate["test_accuracy"]),
+                "macro_f1": float(aggregate["test_macro_f1"]),
+                "weighted_f1": float(aggregate["test_weighted_f1"]),
+                "inference_time_per_sample_ms": float(aggregate["test_inference_ms"]),
+                "std": {
+                    "accuracy": float(aggregate["test_accuracy_std"]),
+                    "macro_f1": float(aggregate["test_macro_f1_std"]),
+                    "weighted_f1": float(aggregate["test_weighted_f1_std"]),
+                    "inference_time_per_sample_ms": float(aggregate["test_inference_ms_std"]),
+                },
+            },
+            "parameter_count": int(round(_safe_float(first.get("parameter_count", 0.0)))),
+            "noise_repeat_count": int(len(repeat_rows)),
+            "repeat_metrics_paths": [str(row.get("metrics_path", "")) for row in repeat_rows],
+        }
+        metrics_path.write_text(json.dumps(metrics_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        aggregate_rows.append(aggregate)
+    return aggregate_rows
+
+
 def merge_clean_rows_with_noise_rows(
     *,
     old_summary_path: Path | None = None,
@@ -836,6 +938,14 @@ def _normalize_feature_scope(model_key: str, settings: dict[str, Any] | None = N
         "x_op": "x_op_only",
         "x_op_only": "x_op_only",
         "op_only": "x_op_only",
+        "x_eis": "x_eis_only",
+        "x_eis_only": "x_eis_only",
+        "eis_only": "x_eis_only",
+        "eis": "x_eis_only",
+        "x_cond": "x_cond_only",
+        "x_cond_only": "x_cond_only",
+        "cond_only": "x_cond_only",
+        "cond": "x_cond_only",
         "all": "all_modalities",
         "all_modalities": "all_modalities",
         "x_op+x_eis+x_cond": "all_modalities",
@@ -918,6 +1028,77 @@ def _flatten_split_all_modalities(npz_path: Path, split_value: int) -> tuple[np.
     )
     labels = np.asarray(data[label_key][indices], dtype=np.int64)
     return features, labels
+
+
+def _zeros_like_modality(value: Any) -> Any:
+    if hasattr(value, "new_zeros"):
+        return value.new_zeros(value.shape)
+    return np.zeros_like(value)
+
+
+def _clone_modality(value: Any) -> Any:
+    if hasattr(value, "clone"):
+        return value.clone()
+    if hasattr(value, "copy"):
+        return value.copy()
+    return np.asarray(value).copy()
+
+
+class _ScopedTorchFeatureDataset:
+    def __init__(self, dataset: Any, *, use_x_op: bool, use_x_eis: bool, use_x_cond: bool) -> None:
+        self.x_op = _clone_modality(dataset.x_op) if use_x_op else _zeros_like_modality(dataset.x_op)
+        self.x_eis = _clone_modality(dataset.x_eis) if use_x_eis else _zeros_like_modality(dataset.x_eis)
+        self.x_cond = _clone_modality(dataset.x_cond) if use_x_cond else _zeros_like_modality(dataset.x_cond)
+        self.labels = dataset.labels
+
+    def __len__(self) -> int:
+        if hasattr(self.labels, "numel"):
+            return int(self.labels.numel())
+        return int(len(self.labels))
+
+    def __getitem__(self, index: int) -> tuple[Any, Any, Any, Any]:
+        return self.x_op[index], self.x_eis[index], self.x_cond[index], self.labels[index]
+
+
+def _scope_torch_dataset_features(dataset: Any, model_key: str, settings: dict[str, Any] | None = None) -> Any:
+    feature_scope = _normalize_feature_scope(model_key, settings)
+    if feature_scope == "all_modalities":
+        return dataset
+    if feature_scope == "x_op_only":
+        return _ScopedTorchFeatureDataset(dataset, use_x_op=True, use_x_eis=False, use_x_cond=False)
+    if feature_scope == "x_eis_only":
+        return _ScopedTorchFeatureDataset(dataset, use_x_op=False, use_x_eis=True, use_x_cond=False)
+    if feature_scope == "x_cond_only":
+        return _ScopedTorchFeatureDataset(dataset, use_x_op=False, use_x_eis=False, use_x_cond=True)
+    raise ValueError(
+        f"torch baseline 不支持 feature_scope={feature_scope!r}; "
+        "目前支持 all_modalities、x_op_only、x_eis_only 和 x_cond_only"
+    )
+
+
+def _scope_torch_npz_features(npz_path: Path, output_dir: Path, model_key: str, settings: dict[str, Any] | None = None) -> Path:
+    feature_scope = _normalize_feature_scope(model_key, settings)
+    if feature_scope == "all_modalities":
+        return npz_path
+    supported_scopes = {"x_op_only", "x_eis_only", "x_cond_only"}
+    if feature_scope not in supported_scopes:
+        raise ValueError(
+            f"torch baseline 不支持 feature_scope={feature_scope!r}; "
+            "目前支持 all_modalities、x_op_only、x_eis_only 和 x_cond_only"
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scoped_path = output_dir / f"{npz_path.stem}.{feature_scope}.npz"
+    with np.load(npz_path) as data:
+        arrays = {key: data[key] for key in data.files}
+    if feature_scope != "x_op_only" and "x_op" in arrays:
+        arrays["x_op"] = np.zeros_like(arrays["x_op"])
+    if feature_scope != "x_eis_only" and "x_eis" in arrays:
+        arrays["x_eis"] = np.zeros_like(arrays["x_eis"])
+    cond_key = "x_cond" if "x_cond" in arrays else "cond"
+    if feature_scope != "x_cond_only" and cond_key in arrays:
+        arrays[cond_key] = np.zeros_like(arrays[cond_key])
+    np.savez_compressed(scoped_path, **arrays)
+    return scoped_path
 
 
 def _normalize_class_weight(value: Any) -> str | None:
@@ -1018,7 +1199,10 @@ def _train_and_evaluate(
     noisy_npzs: dict[str, tuple[Path, dict[str, Any]]],
     clean_by_model: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    from scripts import run_official_baseline_experiments as baseline
+    try:
+        from scripts import run_official_baseline_experiments as baseline
+    except ImportError:
+        from experiments import run_official_baseline_experiments as baseline
     import torch
     from torch.utils.data import DataLoader
 
@@ -1095,7 +1279,10 @@ def _train_and_evaluate(
             settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
             if bool(args.strict_comparison_artifacts):
                 settings = comparison_torch_settings(settings)
-            train_ds = baseline.BaselineNPZDataset(clean_npz, split_value=0)
+            scoped_npz_dir = output_root / "_scoped_torch_npz" / model_key
+            scoped_clean_npz = _scope_torch_npz_features(clean_npz, scoped_npz_dir, model_key, settings)
+            scoped_clean_eval_npz = _scope_torch_npz_features(clean_eval_npz, scoped_npz_dir, model_key, settings)
+            train_ds = _scope_torch_dataset_features(baseline.BaselineNPZDataset(clean_npz, split_value=0), model_key, settings)
             num_classes = baseline._num_classes(clean_npz)
             checkpoint_path = _resolve_checkpoint_from_clean_row(clean_by_model.get(model_key, {}))
             if checkpoint_path is None and bool(args.strict_comparison_artifacts):
@@ -1104,7 +1291,7 @@ def _train_and_evaluate(
                 train_dir = output_root / "_trained_clean" / model_key
                 metrics_path = baseline.run_torch_baseline(
                     model_key=model_key,
-                    npz_path=clean_npz,
+                    npz_path=scoped_clean_npz,
                     output_dir=train_dir,
                     epochs=int(settings.get("epochs", args.epochs)),
                     patience=int(settings.get("patience", args.patience)),
@@ -1126,19 +1313,29 @@ def _train_and_evaluate(
             torch_checkpoints[model_key] = (checkpoint_path, (train_ds, num_classes, settings))
             if model_key not in clean_by_model:
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                if bool(args.strict_comparison_artifacts):
+                    _hidden = int(args.hidden_dim)
+                    _d_model = int(args.d_model)
+                    _n_layers = int(args.num_layers)
+                    _dropout = float(args.dropout)
+                else:
+                    _hidden = int(settings.get("hidden_dim", args.hidden_dim))
+                    _d_model = int(settings.get("d_model", args.d_model))
+                    _n_layers = int(settings.get("num_layers", args.num_layers))
+                    _dropout = float(settings.get("dropout", args.dropout))
                 model = baseline._build_torch_model(
                     model_key,
                     train_ds,
                     num_classes,
-                    int(settings.get("hidden_dim", args.hidden_dim)),
-                    int(settings.get("d_model", args.d_model)),
-                    int(settings.get("num_layers", args.num_layers)),
-                    float(settings.get("dropout", args.dropout)),
+                    _hidden,
+                    _d_model,
+                    _n_layers,
+                    _dropout,
                 ).to(device)
                 checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
                 model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
-                val_ds = baseline.BaselineNPZDataset(clean_npz, split_value=1)
-                test_ds = baseline.BaselineNPZDataset(clean_eval_npz, split_value=2)
+                val_ds = _scope_torch_dataset_features(baseline.BaselineNPZDataset(clean_npz, split_value=1), model_key, settings)
+                test_ds = _scope_torch_dataset_features(baseline.BaselineNPZDataset(clean_eval_npz, split_value=2), model_key, settings)
                 batch_size = int(settings.get("batch_size", args.batch_size))
                 val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
                 test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
@@ -1157,7 +1354,7 @@ def _train_and_evaluate(
                 fresh_clean_by_model[model_key] = _clean_row_from_metrics(
                     model_key,
                     clean_metrics_path,
-                    clean_eval_npz,
+                    scoped_clean_eval_npz,
                     clean_alignment_source=str(checkpoint_path),
                     ratio_label=ratio_label,
                 )
@@ -1168,6 +1365,9 @@ def _train_and_evaluate(
                 proposed_checkpoint = resolve_comparison_torch_checkpoint(comparison_artifact_root, model_key)
             if proposed_checkpoint is None:
                 train_dir = output_root / "_trained_clean" / model_key
+                init_checkpoint = settings.get("init_checkpoint", args.init_checkpoint)
+                if init_checkpoint:
+                    init_checkpoint = _resolve_path_string(str(init_checkpoint))
                 baseline.run_proposed_model(
                     npz_path=clean_npz,
                     output_dir=train_dir,
@@ -1185,7 +1385,7 @@ def _train_and_evaluate(
                     weight_decay=float(settings.get("weight_decay", args.proposed_weight_decay)),
                     checkpoint_selection=str(settings.get("checkpoint_selection", args.checkpoint_selection)),
                     selection_score=str(settings.get("selection_score_default", args.selection_score)),
-                    init_checkpoint=args.init_checkpoint,
+                    init_checkpoint=init_checkpoint,
                 )
                 proposed_checkpoint = train_dir / "best.ckpt"
             if model_key not in clean_by_model:
@@ -1209,12 +1409,17 @@ def _train_and_evaluate(
         else:
             raise KeyError(model_key)
 
-    for snr_label, (npz_path, noise_summary) in noisy_npzs.items():
+    repeat_noise_rows: list[dict[str, Any]] = []
+    for snr_job_label, (npz_path, noise_summary) in noisy_npzs.items():
         snr_db = float(noise_summary["snr_db"])
-        print(f"\n=== 评估 SNR={snr_label} dB ===", flush=True)
+        snr_label = _snr_token(snr_db)
+        print(f"\n=== 评估 SNR={snr_job_label} dB ===", flush=True)
         for model_key in args.models:
             clean_row = fresh_clean_by_model[model_key]
-            eval_dir = output_root / model_key / f"snr_{snr_label}dB"
+            repeat_suffix = ""
+            if int(noise_summary.get("noise_repeat_count", 1)) > 1:
+                repeat_suffix = f"_seed_{int(noise_summary.get('noise_repeat_index', 0)) + 1}"
+            eval_dir = output_root / model_key / f"snr_{snr_label}dB{repeat_suffix}"
             eval_dir.mkdir(parents=True, exist_ok=True)
             if model_key in ml_models:
                 model = trained_models[model_key]
@@ -1247,19 +1452,32 @@ def _train_and_evaluate(
             elif model_key in torch_models:
                 checkpoint_path, (train_ds, num_classes, settings) = torch_checkpoints[model_key]
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                # When using strict comparison artifacts, use command-line model
+                # dimensions (which should match the checkpoint) rather than the
+                # comparison config's possibly-different "modest" settings.
+                if bool(args.strict_comparison_artifacts):
+                    _hidden = int(args.hidden_dim)
+                    _d_model = int(args.d_model)
+                    _n_layers = int(args.num_layers)
+                    _dropout = float(args.dropout)
+                else:
+                    _hidden = int(settings.get("hidden_dim", args.hidden_dim))
+                    _d_model = int(settings.get("d_model", args.d_model))
+                    _n_layers = int(settings.get("num_layers", args.num_layers))
+                    _dropout = float(settings.get("dropout", args.dropout))
                 model = baseline._build_torch_model(
                     model_key,
                     train_ds,
                     num_classes,
-                    int(settings.get("hidden_dim", args.hidden_dim)),
-                    int(settings.get("d_model", args.d_model)),
-                    int(settings.get("num_layers", args.num_layers)),
-                    float(settings.get("dropout", args.dropout)),
+                    _hidden,
+                    _d_model,
+                    _n_layers,
+                    _dropout,
                 ).to(device)
                 checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
                 model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
-                val_ds = baseline.BaselineNPZDataset(clean_npz, split_value=1)
-                test_ds = baseline.BaselineNPZDataset(npz_path, split_value=2)
+                val_ds = _scope_torch_dataset_features(baseline.BaselineNPZDataset(clean_npz, split_value=1), model_key, settings)
+                test_ds = _scope_torch_dataset_features(baseline.BaselineNPZDataset(npz_path, split_value=2), model_key, settings)
                 batch_size = int(settings.get("batch_size", args.batch_size))
                 val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
                 test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
@@ -1288,7 +1506,7 @@ def _train_and_evaluate(
                 )
                 metrics_path = eval_dir / "metrics.json"
                 clean_source = str(proposed_checkpoint)
-            noise_rows.append(
+            repeat_noise_rows.append(
                 _row_from_metrics(
                     model_key=model_key,
                     snr_db=snr_db,
@@ -1301,6 +1519,10 @@ def _train_and_evaluate(
                     ratio_label=ratio_label,
                 )
             )
+    if int(getattr(args, "noise_repeats", 1)) > 1:
+        noise_rows.extend(aggregate_noise_repeat_rows(repeat_noise_rows, aggregate_metrics_root=output_root / "_aggregate_noise_repeats"))
+    else:
+        noise_rows.extend(repeat_noise_rows)
     if proposed_checkpoint is not None and "proposed" in fresh_clean_by_model:
         proposed_clean_row = fresh_clean_by_model["proposed"]
         proposed_settings = resolve_model_run_settings(comparison_config, "proposed", ratio_key=ratio_key)
@@ -1314,6 +1536,7 @@ def _train_and_evaluate(
                     snr_db=float(snr_db),
                     noise_targets=[modality_target],
                     seed=noise_seed_for_snr(int(args.seed), float(snr_db)) + len(modality_target),
+                    snr_scope=str(getattr(args, "snr_scope", "global")),
                 )
                 eval_dir = output_root / "proposed" / f"{modality_target}_snr_{label}dB"
                 proposed_eval.run_evaluation(
@@ -1364,6 +1587,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--models", nargs="+", default=None, choices=list(MODEL_CATEGORIES.keys()))
     parser.add_argument("--snr-dbs", nargs="+", type=float, default=DEFAULT_SNR_DBS)
     parser.add_argument("--noise-targets", nargs="+", default=["x_op", "x_eis", "x_cond"], choices=["x_op", "x_eis", "x_cond"])
+    parser.add_argument("--snr-scope", choices=["global", "per_sample_modality"], default="per_sample_modality", help="global 保持旧版整体功率缩放；per_sample_modality 按每个测试样本、每个目标模态独立缩放")
+    parser.add_argument("--noise-repeats", type=int, default=1, help="每个 SNR 的独立噪声 seed 重复次数；1 保持旧输出路径，>1 汇总 mean/std")
     parser.add_argument("--seed", type=int, default=44)
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--proposed-epochs", type=int, default=80)
@@ -1396,6 +1621,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.ratio_label is None:
         args.ratio_label = str(args.ratio_key).replace("_", ":")
+    if int(args.noise_repeats) < 1:
+        parser.error("--noise-repeats 必须 >= 1")
     return args
 
 
@@ -1457,22 +1684,33 @@ def main(argv: list[str] | None = None) -> None:
         "snr_dbs": ["clean"] + [_snr_token(value) for value in args.snr_dbs],
         "noise_targets": list(args.noise_targets),
         "noise_scope": "test_split_only",
+        "snr_scope": str(args.snr_scope),
+        "noise_repeats": int(args.noise_repeats),
         "clean_rows_source": "same_run_same_checkpoint" if args.clean_source == "same-run" else "reference_clean_summary_explicit",
         "original_no_noise_workbook_sheets": "untouched",
         "reference_clean_summary": str(ROOT / args.reference_clean_summary),
         "clean_subset_summary": clean_subset_summary,
     }
-    for snr_db in args.snr_dbs:
-        label = _snr_token(snr_db)
-        noisy_path = data_root / f"snr_{label}dB.npz"
+    for job in build_snr_noise_jobs(
+        data_root=data_root,
+        snr_dbs=args.snr_dbs,
+        base_seed=int(args.seed),
+        noise_repeats=int(args.noise_repeats),
+    ):
+        label = str(job["snr_label"])
+        noisy_path = Path(job["npz_path"])
         noise_summary = write_test_subset_with_snr_noise(
             clean_npz,
             noisy_path,
-            snr_db=float(snr_db),
+            snr_db=float(job["snr_db"]),
             noise_targets=list(args.noise_targets),
-            seed=noise_seed_for_snr(int(args.seed), float(snr_db)),
+            seed=int(job["seed"]),
+            snr_scope=str(args.snr_scope),
         )
-        noisy_npzs[label] = (noisy_path, noise_summary)
+        noise_summary["noise_repeat_index"] = int(job["repeat_index"])
+        noise_summary["noise_repeat_count"] = int(args.noise_repeats)
+        npz_key = label if int(args.noise_repeats) == 1 else f"{label}_seed_{int(job['repeat_index']) + 1}"
+        noisy_npzs[npz_key] = (noisy_path, noise_summary)
     (output_root / "protocol.json").write_text(json.dumps(protocol, indent=2, ensure_ascii=False), encoding="utf-8")
 
     noise_rows, fresh_clean_by_model, modality_rows = _train_and_evaluate(args, noisy_npzs, clean_by_model)

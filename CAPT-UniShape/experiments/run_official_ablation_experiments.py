@@ -27,7 +27,7 @@ noise_seed_for_snr = _snr.noise_seed_for_snr
 
 DEFAULT_ABLATION_VARIANTS = ["full_rbf", "no_rbf", "no_kan_fusion", "static_prototype", "no_condition_input"]
 DEFAULT_FULL_METRICS_PATH = ""
-DEFAULT_ABLATION_SNR_DBS = [30.0, 20.0, 10.0]
+DEFAULT_ABLATION_SNR_DBS = [20.0, 10.0, 0.0]
 DEFAULT_SNR_NOISE_SEEDS = [44, 45, 46]
 DEFAULT_NOISE_TARGETS = ["x_op", "x_eis", "x_cond"]
 ABLATION_CONFIG = "configs/ablation.yaml"

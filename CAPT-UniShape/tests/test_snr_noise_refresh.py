@@ -47,6 +47,69 @@ class SnrNoiseRefreshTests(unittest.TestCase):
             for actual_snr in summary["target_actual_snr_db"].values():
                 self.assertTrue(math.isclose(actual_snr, 20.0, abs_tol=1e-4))
 
+    def test_per_sample_modality_snr_hits_requested_level_for_each_target_sample(self) -> None:
+        import tempfile
+
+        def actual_snr(clean: np.ndarray, noisy: np.ndarray) -> float:
+            signal_power = float(np.mean(np.square(clean.astype(np.float64))))
+            noise_power = float(np.mean(np.square((noisy - clean).astype(np.float64))))
+            return float(10.0 * math.log10(signal_power / noise_power))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            clean_path = tmp_path / "clean.npz"
+            noisy_path = tmp_path / "snr_15dB.npz"
+            x_op = np.stack(
+                [
+                    np.ones((2, 4), dtype=np.float32),
+                    np.ones((2, 4), dtype=np.float32) * 2.0,
+                    np.ones((2, 4), dtype=np.float32) * 1.5,
+                    np.ones((2, 4), dtype=np.float32) * 9.0,
+                ]
+            )
+            x_eis = np.stack(
+                [
+                    np.ones((1, 5), dtype=np.float32),
+                    np.ones((1, 5), dtype=np.float32) * 3.0,
+                    np.ones((1, 5), dtype=np.float32) * 2.5,
+                    np.ones((1, 5), dtype=np.float32) * 12.0,
+                ]
+            )
+            x_cond = np.asarray(
+                [
+                    [1.0, 2.0, 3.0],
+                    [2.0, 3.0, 4.0],
+                    [1.0, 2.0, 4.0],
+                    [10.0, 20.0, 40.0],
+                ],
+                dtype=np.float32,
+            )
+            split = np.asarray([0, 1, 2, 2], dtype=np.int64)
+            labels = np.asarray([0, 1, 1, 2], dtype=np.int64)
+            np.savez_compressed(clean_path, x_op=x_op, x_eis=x_eis, x_cond=x_cond, split=split, labels=labels)
+
+            summary = snr.write_test_subset_with_snr_noise(
+                clean_path,
+                noisy_path,
+                snr_db=15.0,
+                noise_targets=["x_op", "x_eis", "x_cond"],
+                seed=123,
+                snr_scope="per_sample_modality",
+            )
+
+            test_mask = split == 2
+            with np.load(noisy_path) as noisy:
+                for key in ["x_op", "x_eis", "x_cond"]:
+                    clean_subset = locals()[key][test_mask]
+                    for sample_index in range(clean_subset.shape[0]):
+                        self.assertTrue(
+                            math.isclose(actual_snr(clean_subset[sample_index], noisy[key][sample_index]), 15.0, abs_tol=1e-3),
+                            msg=f"{key} sample {sample_index} SNR mismatch",
+                        )
+
+            self.assertEqual(summary["snr_scope"], "per_sample_modality")
+            self.assertEqual(len(summary["target_sample_actual_snr_db"]["x_cond"]), 2)
+
     def test_merge_summary_preserves_clean_rows_and_replaces_noise(self) -> None:
         import tempfile
 
@@ -119,6 +182,8 @@ class SnrNoiseRefreshTests(unittest.TestCase):
         args = snr.parse_args([])
         self.assertEqual(args.clean_source, "comparison-results")
         self.assertEqual(args.summary_path, "results\\噪声对齐论文实验新表.csv")
+        self.assertEqual(args.snr_scope, "per_sample_modality")
+        self.assertEqual(args.noise_repeats, 1)
 
     def test_compact_summary_uses_required_headers_and_four_decimals(self) -> None:
         import tempfile
@@ -132,10 +197,13 @@ class SnrNoiseRefreshTests(unittest.TestCase):
                         "model": "mlp",
                         "snr_db": "40",
                         "test_accuracy": 0.987654,
+                        "test_accuracy_std": 0.012345,
                         "accuracy_drop": -0.012345,
                         "test_macro_f1": 0.876543,
+                        "test_macro_f1_std": 0.023456,
                         "macro_f1_drop": 0.0,
                         "test_weighted_f1": 0.765432,
+                        "test_weighted_f1_std": 0.034567,
                         "weighted_f1_drop": 0.111111,
                         "data_path": "data.npz",
                         "metrics_path": "metrics.json",
@@ -147,6 +215,7 @@ class SnrNoiseRefreshTests(unittest.TestCase):
             with out_path.open("r", newline="", encoding="utf-8") as handle:
                 reader = csv.DictReader(handle)
                 self.assertEqual(reader.fieldnames, snr.COMPACT_SUMMARY_FIELDNAMES)
+                self.assertFalse(any("std" in field for field in reader.fieldnames))
                 rows = list(reader)
 
             self.assertEqual(rows[0]["accuracy"], "0.9877")
@@ -422,6 +491,123 @@ class SnrNoiseRefreshTests(unittest.TestCase):
             ],
         )
 
+    def test_noise_repeat_plan_and_aggregation_keep_clean_single_and_summarize_noisy_rows(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            jobs = snr.build_snr_noise_jobs(
+                data_root=tmp / "data",
+                snr_dbs=[20.0],
+                base_seed=44,
+                noise_repeats=3,
+            )
+
+            self.assertEqual([job["snr_label"] for job in jobs], ["20", "20", "20"])
+            self.assertEqual(len({job["npz_path"] for job in jobs}), 3)
+            self.assertNotIn("clean", {Path(job["npz_path"]).stem for job in jobs})
+
+            aggregate_dir = tmp / "aggregate"
+            rows = snr.aggregate_noise_repeat_rows(
+                [
+                    {
+                        "ratio": "8:2",
+                        "model": "mlp",
+                        "category": "deep_learning",
+                        "snr_db": "20",
+                        "snr_db_numeric": 20.0,
+                        "actual_snr_db_mean": 20.0,
+                        "noise_targets": "x_op+x_eis+x_cond",
+                        "test_accuracy": 0.80,
+                        "accuracy_drop": 0.10,
+                        "test_macro_f1": 0.70,
+                        "macro_f1_drop": 0.10,
+                        "test_weighted_f1": 0.75,
+                        "weighted_f1_drop": 0.10,
+                        "test_inference_ms": 1.0,
+                        "parameter_count": 10,
+                        "data_path": "repeat_1.npz",
+                        "metrics_path": "repeat_1.json",
+                        "clean_alignment_source": "clean.json",
+                    },
+                    {
+                        "ratio": "8:2",
+                        "model": "mlp",
+                        "category": "deep_learning",
+                        "snr_db": "20",
+                        "snr_db_numeric": 20.0,
+                        "actual_snr_db_mean": 20.2,
+                        "noise_targets": "x_op+x_eis+x_cond",
+                        "test_accuracy": 0.90,
+                        "accuracy_drop": 0.00,
+                        "test_macro_f1": 0.80,
+                        "macro_f1_drop": 0.00,
+                        "test_weighted_f1": 0.85,
+                        "weighted_f1_drop": 0.00,
+                        "test_inference_ms": 2.0,
+                        "parameter_count": 10,
+                        "data_path": "repeat_2.npz",
+                        "metrics_path": "repeat_2.json",
+                        "clean_alignment_source": "clean.json",
+                    },
+                    {
+                        "ratio": "8:2",
+                        "model": "mlp",
+                        "category": "deep_learning",
+                        "snr_db": "20",
+                        "snr_db_numeric": 20.0,
+                        "actual_snr_db_mean": 19.8,
+                        "noise_targets": "x_op+x_eis+x_cond",
+                        "test_accuracy": 1.00,
+                        "accuracy_drop": -0.10,
+                        "test_macro_f1": 0.90,
+                        "macro_f1_drop": -0.10,
+                        "test_weighted_f1": 0.95,
+                        "weighted_f1_drop": -0.10,
+                        "test_inference_ms": 3.0,
+                        "parameter_count": 10,
+                        "data_path": "repeat_3.npz",
+                        "metrics_path": "repeat_3.json",
+                        "clean_alignment_source": "clean.json",
+                    },
+                ],
+                aggregate_metrics_root=aggregate_dir,
+            )
+
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertAlmostEqual(row["test_accuracy"], 0.90)
+            self.assertAlmostEqual(row["test_accuracy_std"], float(np.std([0.80, 0.90, 1.00], ddof=0)))
+            self.assertAlmostEqual(row["test_macro_f1"], 0.80)
+            self.assertAlmostEqual(row["test_weighted_f1"], 0.85)
+            self.assertTrue(Path(row["metrics_path"]).exists())
+
+            payload = snr._metric_payload(Path(row["metrics_path"]))
+            self.assertAlmostEqual(payload["test"]["accuracy"], row["test_accuracy"])
+            self.assertAlmostEqual(payload["test"]["macro_f1"], row["test_macro_f1"])
+            self.assertAlmostEqual(payload["test"]["weighted_f1"], row["test_weighted_f1"])
+            self.assertAlmostEqual(payload["test"]["std"]["accuracy"], row["test_accuracy_std"])
+            self.assertAlmostEqual(payload["test"]["std"]["macro_f1"], row["test_macro_f1_std"])
+            self.assertAlmostEqual(payload["test"]["std"]["weighted_f1"], row["test_weighted_f1_std"])
+            self.assertAlmostEqual(payload["test"]["std"]["inference_time_per_sample_ms"], row["test_inference_ms_std"])
+
+            merged = snr.merge_clean_rows_with_noise_rows(
+                clean_rows_by_model={
+                    "mlp": {
+                        "ratio": "8:2",
+                        "model": "mlp",
+                        "category": "deep_learning",
+                        "snr_db": "clean",
+                        "test_accuracy": 1.0,
+                        "metrics_path": "clean.json",
+                    }
+                },
+                noise_rows=rows,
+                model_order=["mlp"],
+                snr_order=["clean", "20"],
+            )
+            self.assertEqual([row["snr_db"] for row in merged], ["clean", "20"])
+
     def test_update_workbook_snr_sheet_uses_times_new_roman_font(self) -> None:
         import tempfile
 
@@ -497,6 +683,10 @@ class SnrNoiseRefreshTests(unittest.TestCase):
                 values = [worksheet.cell(2, column).value for column in range(1, worksheet.max_column + 1)]
             finally:
                 saved.close()
+                del saved
+                import gc
+
+                gc.collect()
 
             self.assertEqual(
                 headers,
@@ -510,12 +700,16 @@ class SnrNoiseRefreshTests(unittest.TestCase):
                 "model": "proposed",
                 "snr_db": "40",
                 "test_accuracy": 1.0,
+                "test_accuracy_std": 0.01,
                 "accuracy_drop": 0.12345,
                 "test_macro_f1": 0.815384615,
+                "test_macro_f1_std": 0.02,
                 "macro_f1_drop": 0.184615384,
                 "test_weighted_f1": 0.931934732,
+                "test_weighted_f1_std": 0.03,
                 "weighted_f1_drop": 0.068065268,
                 "test_inference_ms": 25.2239,
+                "test_inference_ms_std": 0.04,
                 "parameter_count": 6496573,
                 "data_path": "clean.npz",
                 "metrics_path": "metrics.json",
@@ -530,6 +724,7 @@ class SnrNoiseRefreshTests(unittest.TestCase):
         self.assertEqual(row["weighted_f1_drop"], "6.81%")
         self.assertEqual(row["test_inference_ms"], "25.2239")
         self.assertEqual(row["alignment_source"], "comparison_summary_reference")
+        self.assertFalse(any("std" in field for field in row))
 
     def test_normalize_legacy_summary_row_schema(self) -> None:
         row = snr.normalize_summary_row_schema(
@@ -1075,6 +1270,78 @@ excluded_models:
             self.assertTrue(np.array_equal(y_op_only, np.asarray([1, 2], dtype=np.int64)))
             self.assertTrue(np.array_equal(y_all, np.asarray([1, 2], dtype=np.int64)))
 
+    def test_normalize_feature_scope_supports_eis_and_cond_aliases(self) -> None:
+        self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "x_eis_only"}), "x_eis_only")
+        self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "eis_only"}), "x_eis_only")
+        self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "eis"}), "x_eis_only")
+        self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "x_cond_only"}), "x_cond_only")
+        self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "cond_only"}), "x_cond_only")
+        self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "cond"}), "x_cond_only")
+
+    def test_scope_torch_dataset_features_zeroes_unused_modalities(self) -> None:
+        class ToyTorchDataset:
+            def __init__(self) -> None:
+                self.x_op = np.ones((2, 2, 4), dtype=np.float32)
+                self.x_eis = np.ones((2, 1, 3), dtype=np.float32) * 2.0
+                self.x_cond = np.ones((2, 3), dtype=np.float32) * 3.0
+                self.labels = np.asarray([0, 1], dtype=np.int64)
+
+            def __len__(self) -> int:
+                return int(len(self.labels))
+
+            def __getitem__(self, index: int):
+                return self.x_op[index], self.x_eis[index], self.x_cond[index], self.labels[index]
+
+        original = ToyTorchDataset()
+
+        scoped = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "x_op_only"})
+        eis_scoped = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "x_eis_only"})
+        cond_scoped = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "x_cond_only"})
+        all_modalities = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "all_modalities"})
+
+        self.assertTrue(np.array_equal(scoped.x_op, original.x_op))
+        self.assertTrue(np.array_equal(scoped.x_eis, np.zeros_like(original.x_eis)))
+        self.assertTrue(np.array_equal(scoped.x_cond, np.zeros_like(original.x_cond)))
+        self.assertTrue(np.array_equal(eis_scoped.x_op, np.zeros_like(original.x_op)))
+        self.assertTrue(np.array_equal(eis_scoped.x_eis, original.x_eis))
+        self.assertTrue(np.array_equal(eis_scoped.x_cond, np.zeros_like(original.x_cond)))
+        self.assertTrue(np.array_equal(cond_scoped.x_op, np.zeros_like(original.x_op)))
+        self.assertTrue(np.array_equal(cond_scoped.x_eis, np.zeros_like(original.x_eis)))
+        self.assertTrue(np.array_equal(cond_scoped.x_cond, original.x_cond))
+        self.assertTrue(np.array_equal(all_modalities.x_eis, original.x_eis))
+        self.assertTrue(np.array_equal(all_modalities.x_cond, original.x_cond))
+        self.assertTrue(np.array_equal(original.x_eis, np.ones_like(original.x_eis) * 2.0))
+
+    def test_scope_torch_npz_features_zeroes_unused_modalities_for_eis_only(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            npz_path = tmp / "toy.npz"
+            x_op = np.ones((2, 2, 4), dtype=np.float32)
+            x_eis = np.ones((2, 1, 3), dtype=np.float32) * 2.0
+            x_cond = np.ones((2, 3), dtype=np.float32) * 3.0
+            np.savez_compressed(
+                npz_path,
+                x_op=x_op,
+                x_eis=x_eis,
+                x_cond=x_cond,
+                split=np.asarray([0, 2], dtype=np.int64),
+                labels=np.asarray([0, 1], dtype=np.int64),
+            )
+
+            scoped_path = snr._scope_torch_npz_features(
+                npz_path,
+                tmp / "scoped",
+                "mlp",
+                {"feature_scope": "x_eis_only"},
+            )
+
+            with np.load(scoped_path) as scoped:
+                self.assertTrue(np.array_equal(scoped["x_op"], np.zeros_like(x_op)))
+                self.assertTrue(np.array_equal(scoped["x_eis"], x_eis))
+                self.assertTrue(np.array_equal(scoped["x_cond"], np.zeros_like(x_cond)))
+
     def test_build_ml_model_from_settings_honors_pipeline_configuration(self) -> None:
         svm_model = snr._build_ml_model_from_settings(
             "svm",
@@ -1130,43 +1397,70 @@ excluded_models:
         self.assertEqual(int(baselines["random_forest"]["pca_components"]), 4)
         self.assertEqual(int(baselines["random_forest"]["max_depth"]), 3)
 
-        self.assertEqual(int(baselines["mlp"]["hidden_dim"]), 8)
-        self.assertGreaterEqual(float(baselines["mlp"]["dropout"]), 0.35)
-        self.assertGreaterEqual(int(baselines["mlp"]["epochs"]), 18)
+        self.assertEqual(int(baselines["mlp"]["hidden_dim"]), 64)
+        self.assertAlmostEqual(float(baselines["mlp"]["dropout"]), 0.1)
+        self.assertEqual(int(baselines["mlp"]["epochs"]), 80)
 
-        self.assertEqual(int(baselines["transformer"]["d_model"]), 8)
-        self.assertEqual(int(baselines["transformer"]["num_layers"]), 1)
-        self.assertGreaterEqual(float(baselines["transformer"]["dropout"]), 0.3)
-        self.assertGreaterEqual(int(baselines["transformer"]["epochs"]), 20)
+        self.assertEqual(int(baselines["transformer"]["d_model"]), 64)
+        self.assertEqual(int(baselines["transformer"]["num_layers"]), 2)
+        self.assertAlmostEqual(float(baselines["transformer"]["dropout"]), 0.1)
+        self.assertEqual(int(baselines["transformer"]["epochs"]), 80)
 
-        self.assertEqual(int(baselines["itransformer"]["d_model"]), 8)
-        self.assertEqual(int(baselines["itransformer"]["num_layers"]), 1)
-        self.assertGreaterEqual(float(baselines["itransformer"]["dropout"]), 0.35)
-        self.assertEqual(str(baselines["itransformer"]["class_weighting"]).lower(), "none")
+        self.assertEqual(int(baselines["itransformer"]["d_model"]), 64)
+        self.assertEqual(int(baselines["itransformer"]["num_layers"]), 2)
+        self.assertAlmostEqual(float(baselines["itransformer"]["dropout"]), 0.1)
+        self.assertEqual(str(baselines["itransformer"]["class_weighting"]).lower(), "sqrt_balanced")
 
-    def test_current_config_preserves_comparison_strength_for_6_4_cnn_and_transformer(self) -> None:
+    def test_current_config_preserves_comparison_strength_for_6_4_torch_overrides(self) -> None:
         config = snr.load_current_comparison_config(
             Path(__file__).resolve().parents[1] / "configs" / "current_comparison_models.yaml"
         )
 
+        proposed = snr.resolve_model_run_settings(config, "proposed", ratio_key="6_4")
+        mlp = snr.resolve_model_run_settings(config, "mlp", ratio_key="6_4")
         cnn1d = snr.resolve_model_run_settings(config, "cnn1d", ratio_key="6_4")
         transformer = snr.resolve_model_run_settings(config, "transformer", ratio_key="6_4")
-        itransformer = snr.resolve_model_run_settings(config, "itransformer", ratio_key="6_4")
 
-        self.assertEqual(cnn1d["setting_name"], "modest_torch_cnn1d")
+        self.assertEqual(proposed["setting_name"], "proposed_clean_checkpoint_finetune_6_4")
+        self.assertIn("updated_dataset_proposed_ratio_comparison_20260513_seed44/6_4/best.ckpt", proposed["init_checkpoint"])
+        self.assertEqual(int(proposed["epochs"]), 12)
+        self.assertEqual(int(proposed["patience"]), 4)
+        self.assertAlmostEqual(float(proposed["lr"]), 0.00002)
+
+        self.assertEqual(mlp["setting_name"], "ordinary_full_modal_mlp_h16_ep18_do30")
+        self.assertEqual(mlp["feature_scope"], "all_modalities")
+        self.assertEqual(int(mlp["hidden_dim"]), 16)
+        self.assertEqual(int(mlp["epochs"]), 18)
+        self.assertEqual(int(mlp["patience"]), 4)
+        self.assertEqual(int(mlp["min_epochs_before_stop"]), 7)
+        self.assertAlmostEqual(float(mlp["dropout"]), 0.3)
+        self.assertAlmostEqual(float(mlp["lr"]), 0.001)
+        self.assertAlmostEqual(float(mlp["weight_decay"]), 0.0005)
+        self.assertEqual(str(mlp["class_weighting"]).lower(), "balanced")
+        self.assertEqual(int(mlp["batch_size"]), 32)
+
+        self.assertEqual(cnn1d["setting_name"], "ordinary_full_modal_cnn1d_h6_ep16_do45")
+        self.assertEqual(cnn1d["feature_scope"], "all_modalities")
         self.assertEqual(int(cnn1d["hidden_dim"]), 6)
-        self.assertEqual(int(cnn1d["epochs"]), 18)
-        self.assertAlmostEqual(float(cnn1d["dropout"]), 0.4)
+        self.assertEqual(int(cnn1d["epochs"]), 16)
+        self.assertEqual(int(cnn1d["patience"]), 4)
+        self.assertEqual(int(cnn1d["min_epochs_before_stop"]), 8)
+        self.assertAlmostEqual(float(cnn1d["dropout"]), 0.45)
+        self.assertAlmostEqual(float(cnn1d["lr"]), 0.0006)
+        self.assertAlmostEqual(float(cnn1d["weight_decay"]), 0.001)
         self.assertEqual(str(cnn1d["class_weighting"]).lower(), "sqrt_balanced")
 
         self.assertEqual(transformer["setting_name"], "modest_torch_transformer")
+        self.assertEqual(transformer["feature_scope"], "all_modalities")
         self.assertEqual(int(transformer["d_model"]), 8)
-        self.assertEqual(int(transformer["epochs"]), 20)
-        self.assertAlmostEqual(float(transformer["dropout"]), 0.35)
-        self.assertEqual(str(transformer["class_weighting"]).lower(), "sqrt_balanced")
-
-        self.assertEqual(itransformer["setting_name"], "modest_torch_itransformer")
-        self.assertEqual(int(itransformer["d_model"]), 8)
+        self.assertEqual(int(transformer["num_layers"]), 1)
+        self.assertEqual(int(transformer["epochs"]), 14)
+        self.assertEqual(int(transformer["patience"]), 3)
+        self.assertEqual(int(transformer["min_epochs_before_stop"]), 6)
+        self.assertAlmostEqual(float(transformer["dropout"]), 0.5)
+        self.assertAlmostEqual(float(transformer["lr"]), 0.0005)
+        self.assertAlmostEqual(float(transformer["weight_decay"]), 0.002)
+        self.assertEqual(str(transformer["class_weighting"]).lower(), "balanced")
 
     def test_current_config_preserves_comparison_strength_for_6_4_traditional_ml(self) -> None:
         config = snr.load_current_comparison_config(
@@ -1177,18 +1471,29 @@ excluded_models:
         svm = snr.resolve_model_run_settings(config, "svm", ratio_key="6_4")
         random_forest = snr.resolve_model_run_settings(config, "random_forest", ratio_key="6_4")
 
+        self.assertEqual(logreg["setting_name"], "ordinary_op_cond_logreg_pca8")
+        self.assertEqual(logreg["feature_scope"], "x_op+x_cond")
         self.assertNotIn("variance_threshold", logreg)
-        self.assertEqual(snr._resolve_pca_components(logreg["pca_components"]), 2)
-        self.assertLessEqual(float(logreg["C"]), 0.1)
+        self.assertEqual(snr._resolve_pca_components(logreg["pca_components"]), 8)
+        self.assertAlmostEqual(float(logreg["C"]), 0.5)
+        self.assertEqual(str(logreg["class_weighting"]).lower(), "none")
 
+        self.assertEqual(svm["setting_name"], "ordinary_op_linear_svm_pca8")
+        self.assertEqual(svm["feature_scope"], "x_op_only")
         self.assertNotIn("variance_threshold", svm)
-        self.assertEqual(snr._resolve_pca_components(svm["pca_components"]), 1)
+        self.assertEqual(snr._resolve_pca_components(svm["pca_components"]), 8)
         self.assertLessEqual(float(svm["C"]), 0.05)
+        self.assertEqual(str(svm["class_weighting"]).lower(), "balanced")
 
+        self.assertEqual(random_forest["setting_name"], "ordinary_op_cond_random_forest_pca8")
+        self.assertEqual(random_forest["feature_scope"], "x_op+x_cond")
         self.assertNotIn("variance_threshold", random_forest)
-        self.assertEqual(snr._resolve_pca_components(random_forest["pca_components"]), 4)
+        self.assertEqual(snr._resolve_pca_components(random_forest["pca_components"]), 8)
+        self.assertEqual(int(random_forest["n_estimators"]), 80)
         self.assertLessEqual(int(random_forest["max_depth"]), 3)
-        self.assertGreaterEqual(int(random_forest["min_samples_leaf"]), 5)
+        self.assertGreaterEqual(int(random_forest["min_samples_leaf"]), 8)
+        self.assertEqual(str(random_forest["class_weighting"]).lower(), "balanced_subsample")
+        self.assertEqual(int(random_forest["random_state"]), 44)
 
 
 if __name__ == "__main__":
