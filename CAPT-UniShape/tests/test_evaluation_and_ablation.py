@@ -122,8 +122,15 @@ class AblationSwitchTests(unittest.TestCase):
         self.assertTrue(args.snr_eval_only)
         self.assertEqual(args.reuse_checkpoints_root, "results/current_ablation_updated_dataset_seed44_6_4")
         self.assertEqual(args.snr_output_root, "results/current_ablation_snr_updated_dataset_seed44_6_4")
-        self.assertEqual(args.snr_dbs, [30.0, 20.0, 10.0])
+        self.assertEqual(args.snr_dbs, [30.0, 5.0])
         self.assertEqual(args.snr_noise_seeds, [44, 45, 46])
+
+    def test_ablation_snr_scenario_labels_are_explicit(self) -> None:
+        from experiments.run_official_ablation_experiments import _scenario_label
+
+        self.assertEqual(_scenario_label("clean"), "clean")
+        self.assertEqual(_scenario_label("30"), "low_noise")
+        self.assertEqual(_scenario_label("5"), "high_noise")
 
     def test_mean_snr_rows_average_only_noisy_repeats(self) -> None:
         from experiments.run_official_ablation_experiments import _mean_snr_rows
@@ -132,6 +139,7 @@ class AblationSwitchTests(unittest.TestCase):
             {
                 "variant": "full_rbf",
                 "description": "完整模型",
+                "scenario": "clean",
                 "snr_db": "clean",
                 "noise_seed": "",
                 "actual_snr_db_mean": "",
@@ -151,6 +159,7 @@ class AblationSwitchTests(unittest.TestCase):
             {
                 "variant": "full_rbf",
                 "description": "完整模型",
+                "scenario": "low_noise",
                 "snr_db": "30",
                 "noise_seed": 44,
                 "actual_snr_db_mean": 30.0,
@@ -170,6 +179,7 @@ class AblationSwitchTests(unittest.TestCase):
             {
                 "variant": "full_rbf",
                 "description": "完整模型",
+                "scenario": "low_noise",
                 "snr_db": "30",
                 "noise_seed": 45,
                 "actual_snr_db_mean": 30.0,
@@ -192,6 +202,7 @@ class AblationSwitchTests(unittest.TestCase):
 
         self.assertEqual(len(mean_rows), 2)
         self.assertEqual(mean_rows[0]["snr_db"], "clean")
+        self.assertEqual(mean_rows[1]["scenario"], "low_noise")
         self.assertEqual(mean_rows[1]["noise_seed"], "mean")
         self.assertEqual(mean_rows[1]["n_noise_seeds"], 2)
         self.assertAlmostEqual(mean_rows[1]["test_accuracy"], 0.8)

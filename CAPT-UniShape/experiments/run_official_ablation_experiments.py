@@ -27,7 +27,7 @@ noise_seed_for_snr = _snr.noise_seed_for_snr
 
 DEFAULT_ABLATION_VARIANTS = ["full_rbf", "no_rbf", "no_kan_fusion", "static_prototype", "no_condition_input"]
 DEFAULT_FULL_METRICS_PATH = ""
-DEFAULT_ABLATION_SNR_DBS = [20.0, 10.0, 0.0]
+DEFAULT_ABLATION_SNR_DBS = [30.0, 5.0]
 DEFAULT_SNR_NOISE_SEEDS = [44, 45, 46]
 DEFAULT_NOISE_TARGETS = ["x_op", "x_eis", "x_cond"]
 ABLATION_CONFIG = "configs/ablation.yaml"
@@ -168,6 +168,17 @@ def _snr_token(value: float) -> str:
     return f"{number:g}"
 
 
+def _scenario_label(snr_db: str) -> str:
+    token = str(snr_db)
+    if token == "clean":
+        return "clean"
+    if token == "30":
+        return "low_noise"
+    if token == "5":
+        return "high_noise"
+    return f"snr_{token}dB"
+
+
 def _variant_overrides(spec: dict[str, Any]) -> dict[str, Any]:
     return dict(spec.get("overrides", {}))
 
@@ -209,6 +220,7 @@ def _snr_result_row(
     return {
         "variant": variant,
         "description": description,
+        "scenario": _scenario_label(snr_db),
         "snr_db": snr_db,
         "noise_seed": noise_seed,
         "n_noise_seeds": n_noise_seeds,
@@ -233,6 +245,7 @@ def _paper_snr_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "variant": row["variant"],
         "description": row["description"],
+        "scenario": row.get("scenario", _scenario_label(str(row["snr_db"]))),
         "snr_db": row["snr_db"],
         "noise_seed": row.get("noise_seed", ""),
         "n_noise_seeds": row.get("n_noise_seeds", ""),
@@ -487,4 +500,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
