@@ -45,7 +45,7 @@ from plot_style import (  # noqa: E402
 
 CLASS_ORDER = [2, 0, 1]
 CLASS_COLORS = {2: MODEL_COLORS[3], 0: MODEL_COLORS[0], 1: MODEL_COLORS[2]}
-CLASS_NAMES = {0: "Class 0", 1: "Class 1", 2: "Class 2"}
+CLASS_NAMES = {0: "Normal", 1: "Flooding", 2: "Drying"}
 LABEL_ALIASES = [LABEL_COL, "类型", "label", "Label", "标签"]
 FEATURE_NAME_EN = {
     "总阻抗": "Total impedance",
@@ -359,52 +359,104 @@ def plot_bar(
     plt.close(fig)
 
 
-def plot_interaction_summary(
-    interactions: np.ndarray[Any, Any],
+def true_class_shap_values(
+    shap_values: np.ndarray[Any, Any],
     labels: np.ndarray[Any, Any],
-    selected_feature_names: list[str],
+    classes: np.ndarray[Any, Any],
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Return per-sample SHAP values for each sample's true class."""
+    values = np.asarray(shap_values, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int64)
+    class_positions = {int(cls): idx for idx, cls in enumerate(np.asarray(classes, dtype=np.int64).tolist())}
+    out = np.zeros((values.shape[0], values.shape[1]), dtype=np.float32)
+    for sample_idx, label in enumerate(y.tolist()):
+        out[sample_idx] = values[sample_idx, :, class_positions[int(label)]]
+    return out
+
+
+def plot_feature_shap_summary(
+    shap_values: np.ndarray[Any, Any],
+    feature_values: np.ndarray[Any, Any],
+    feature_names: list[str],
     output_path: Path,
+    *,
+    top_k: int,
 ) -> None:
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.patches import Rectangle
 
     _setup_matplotlib()
     rng = np.random.default_rng(44)
-    n_rows = len(selected_feature_names)
-    n_cols = len(selected_feature_names)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15.5 * CM, 15.5 * CM), sharex=True, sharey=True, constrained_layout=True)
-    axes_array = np.asarray(axes).reshape(n_rows, n_cols)
-    y = np.asarray(labels, dtype=np.int64)
-    for row in range(n_rows):
-        for col in range(n_cols):
-            ax = axes_array[row, col]
-            x_values = interactions[:, row, col]
-            jitter = rng.normal(0.0, 0.045, size=x_values.shape[0])
-            for class_id in CLASS_ORDER:
-                mask = y == int(class_id)
-                ax.scatter(
-                    x_values[mask],
-                    np.full(mask.sum(), n_rows - 1 - row, dtype=np.float32) + jitter[mask],
-                    s=12,
-                    color=CLASS_COLORS[int(class_id)],
-                    alpha=0.95,
-                    linewidths=0,
-                    zorder=3,
-                )
-            ax.axvline(0.0, color="#7F7F7F", linewidth=0.8, zorder=2)
-            style_axes(ax, grid_axis="y")
-            span = float(np.nanmax(np.abs(interactions))) if interactions.size else 0.1
-            lim = max(0.15, min(0.65, span * 1.20))
-            ax.set_xlim(-lim, lim)
-            if row == 0:
-                ax.set_title(selected_feature_names[col], fontsize=FONT_SIZE)
-            if col == 0:
-                ax.set_yticks(range(n_rows), list(reversed(selected_feature_names)))
-            else:
-                ax.set_yticks(range(n_rows), [])
-            if row != n_rows - 1:
-                ax.tick_params(labelbottom=False)
-    _add_plain_panel_tag(axes_array[0, 0], "(b)")
-    fig.supxlabel("SHAP interaction value", y=0.02)
+    values = np.asarray(shap_values, dtype=np.float32)
+    features = np.asarray(feature_values, dtype=np.float32)
+    order = np.argsort(-np.mean(np.abs(values), axis=0))[: int(top_k)]
+    ordered_names = [feature_names[int(idx)] for idx in order]
+    n_rows = len(order)
+    fig, ax = plt.subplots(figsize=(18 * CM, 11 * CM), constrained_layout=True)
+    cmap = LinearSegmentedColormap.from_list("feature_value", ["#2F5DA8", "#F0F0F0", "#D73027"])
+    for row_pos, feature_idx in enumerate(order[::-1]):
+        x_values = values[:, int(feature_idx)]
+        raw_values = features[:, int(feature_idx)]
+        finite_mask = np.isfinite(raw_values)
+        if finite_mask.sum() <= 1 or np.isclose(np.nanmin(raw_values), np.nanmax(raw_values)):
+            normalized = np.full_like(raw_values, 0.5, dtype=np.float32)
+        else:
+            normalized = np.full_like(raw_values, 0.5, dtype=np.float32)
+            valid_values = raw_values[finite_mask]
+            sorter = np.argsort(valid_values, kind="mergesort")
+            sorted_values = valid_values[sorter]
+            group_starts = np.r_[0, np.flatnonzero(np.diff(sorted_values)) + 1]
+            group_ends = np.r_[group_starts[1:], sorted_values.size]
+            sorted_ranks = np.empty(sorted_values.size, dtype=np.float32)
+            for start, end in zip(group_starts, group_ends):
+                sorted_ranks[start:end] = (start + end - 1) / 2.0
+            ranks = np.empty_like(sorted_ranks)
+            ranks[sorter] = sorted_ranks
+            normalized[finite_mask] = ranks / float(valid_values.size - 1)
+        jitter = rng.normal(0.0, 0.075, size=x_values.shape[0])
+        ax.scatter(
+            x_values,
+            np.full(x_values.shape[0], row_pos, dtype=np.float32) + jitter,
+            c=normalized,
+            cmap=cmap,
+            vmin=0.0,
+            vmax=1.0,
+            s=12,
+            alpha=0.95,
+            linewidths=0,
+            zorder=3,
+        )
+    ax.axvline(0.0, color="#7F7F7F", linewidth=0.8, zorder=2)
+    ax.set_yticks(range(n_rows), list(reversed(ordered_names)))
+    ax.set_xlabel("SHAP value")
+    ax.set_ylabel("Original EIS feature")
+    style_axes(ax, grid_axis="x")
+    _add_plain_panel_tag(ax, "(b)")
+    cbar_ax = ax.inset_axes([1.018, 0.12, 0.026, 0.76], transform=ax.transAxes)
+    n_steps = 96
+    for step in range(n_steps):
+        y0 = step / n_steps
+        cbar_ax.add_patch(
+            Rectangle(
+                (0.0, y0),
+                1.0,
+                1.0 / n_steps,
+                facecolor=cmap((step + 0.5) / n_steps),
+                edgecolor="none",
+            )
+        )
+    cbar_ax.set_xlim(0.0, 1.0)
+    cbar_ax.set_ylim(0.0, 1.0)
+    cbar_ax.set_xticks([])
+    cbar_ax.set_yticks([0.0, 1.0])
+    cbar_ax.set_yticklabels(["Low", "High"])
+    cbar_ax.yaxis.tick_right()
+    cbar_ax.yaxis.set_label_position("right")
+    cbar_ax.set_ylabel("Feature value", rotation=90, labelpad=6, fontsize=FONT_SIZE)
+    cbar_ax.tick_params(axis="y", labelsize=FONT_SIZE, length=2.5, width=0.7)
+    for spine in cbar_ax.spines.values():
+        spine.set_linewidth(0.7)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=600, bbox_inches="tight")
     fig.savefig(output_path.with_suffix(".svg"), bbox_inches="tight")
@@ -432,7 +484,7 @@ def write_meta(
     csv_path: Path,
     raw_feature_names: list[str],
     display_feature_names: list[str],
-    selected_feature_names: list[str],
+    summary_feature_names: list[str],
 ) -> None:
     meta = {
         "analysis": "TreeSHAP EIS feature importance",
@@ -443,14 +495,14 @@ def write_meta(
         "metrics": {key: round(float(value), 4) for key, value in metrics.items()},
         "raw_feature_names": raw_feature_names,
         "display_feature_names": display_feature_names,
-        "interaction_feature_selection": {
-            "rule": "Top-k features by total mean(|SHAP value|) across Class 0, Class 1 and Class 2.",
-            "top_k": len(selected_feature_names),
-            "selected_features": selected_feature_names,
-            "reason": "A full 9 x 9 interaction matrix is difficult to read in a manuscript figure; the 3 x 3 panel follows the provided reference layout and uses the objective SHAP ranking.",
+        "feature_shap_summary": {
+            "rule": "Top-k original EIS statistic features by mean absolute true-class SHAP value.",
+            "top_k": len(summary_feature_names),
+            "selected_features": summary_feature_names,
+            "color": "Per-feature rank-normalized raw feature value on the test set.",
         },
         "bar_figure": str(bar_path),
-        "interaction_summary_figure": str(summary_path),
+        "feature_shap_summary_figure": str(summary_path),
         "csv": str(csv_path),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -509,16 +561,22 @@ def main(argv: list[str] | None = None) -> None:
     classwise_matrix = classwise_mean_abs_impact(impacts)
     raw_feature_names = list(meta["feature_names"])
     feature_names = english_feature_names(raw_feature_names)
-    selected = top_feature_indices(classwise_matrix, top_k=int(args.interaction_top_k))
-    interactions = true_class_interaction_values(model, features[test_mask], labels[test_mask], selected)
-    selected_names = [feature_names[int(idx)] for idx in selected]
+    true_class_impacts = true_class_shap_values(impacts, labels[test_mask], model.classes_)
+    summary_order = np.argsort(-np.mean(np.abs(true_class_impacts), axis=0))[: int(args.top_k)]
+    selected_names = [feature_names[int(idx)] for idx in summary_order]
 
     bar_path = output_dir / f"{args.prefix}_bar.png"
     summary_path = output_dir / f"{args.prefix}_interaction_summary.png"
     csv_path = output_dir / f"{args.prefix}_bar_values.csv"
     meta_path = output_dir / f"{args.prefix}.meta.json"
     plot_bar(classwise_matrix, feature_names, bar_path, top_k=int(args.top_k))
-    plot_interaction_summary(interactions, labels[test_mask], selected_names, summary_path)
+    plot_feature_shap_summary(
+        true_class_impacts,
+        features[test_mask],
+        feature_names,
+        summary_path,
+        top_k=int(args.top_k),
+    )
     write_bar_csv(classwise_matrix, feature_names, csv_path)
     write_meta(
         meta_path,
@@ -529,17 +587,17 @@ def main(argv: list[str] | None = None) -> None:
         csv_path=csv_path,
         raw_feature_names=raw_feature_names,
         display_feature_names=feature_names,
-        selected_feature_names=selected_names,
+        summary_feature_names=selected_names,
     )
     print(
         json.dumps(
             {
                 "bar": str(bar_path),
-                "interaction_summary": str(summary_path),
+                "feature_shap_summary": str(summary_path),
                 "csv": str(csv_path),
                 "meta": str(meta_path),
                 "metrics": metrics,
-                "top_interaction_features": selected_names,
+                "top_feature_shap_features": selected_names,
             },
             ensure_ascii=False,
             indent=2,
