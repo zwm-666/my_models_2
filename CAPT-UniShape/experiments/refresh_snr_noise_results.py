@@ -35,8 +35,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-CANONICAL_MODEL_ORDER = ["proposed", "logreg", "svm", "random_forest", "mlp", "cnn1d", "lstm", "transformer", "itransformer"]
-DEFAULT_MODELS = ["proposed", "logreg", "svm", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"]
+CANONICAL_MODEL_ORDER = [
+    "proposed",
+    "xgboost",
+    "lightgbm",
+    "mlp",
+    "tcn",
+    "autoformer",
+    "transformer",
+    "itransformer",
+    "logreg",
+    "svm",
+    "random_forest",
+    "cnn1d",
+    "lstm",
+]
+DEFAULT_MODELS = ["proposed", "xgboost", "lightgbm", "mlp", "tcn", "autoformer", "transformer", "itransformer"]
 DEFAULT_SNR_DBS = [40.0, 35.0, 30.0, 25.0, 20.0, 15.0, 10.0]
 SUMMARY_FIELDNAMES = [
     "ratio",
@@ -88,20 +102,30 @@ EXPORT_FIELDNAMES = [
 ]
 MODEL_CATEGORIES = {
     "proposed": "proposed",
+    "xgboost": "traditional_ml",
+    "lightgbm": "traditional_ml",
     "logreg": "traditional_ml",
     "svm": "traditional_ml",
     "random_forest": "traditional_ml",
     "mlp": "deep_learning",
     "cnn1d": "deep_learning",
+    "tcn": "deep_learning",
+    "cnn_bilstm_attention": "deep_learning",
     "lstm": "deep_learning",
+    "autoformer": "transformer",
     "transformer": "transformer",
     "itransformer": "itransformer",
 }
 MODEL_DISPLAY_NAMES = {
+    "xgboost": "XGBoost",
+    "lightgbm": "LightGBM",
     "logreg": "Logistic Regression",
     "random_forest": "Random Forest",
     "mlp": "MLP",
     "cnn1d": "1D-CNN",
+    "tcn": "TCN",
+    "cnn_bilstm_attention": "CNN-BiLSTM-Attention",
+    "autoformer": "Autoformer",
     "transformer": "Transformer",
     "itransformer": "iTransformer",
     "proposed": "所提模型",
@@ -931,7 +955,7 @@ def archive_existing_summary(summary_path: Path, old_summary_path: Path) -> None
 
 def _normalize_feature_scope(model_key: str, settings: dict[str, Any] | None = None) -> str:
     payload = settings or {}
-    raw_scope = str(payload.get("feature_scope", "")).strip().lower()
+    raw_scope = str(payload.get("feature_scope", "")).strip().lower().replace(" ", "")
     if not raw_scope:
         return "x_op_only" if model_key == "logreg" else "all_modalities"
     aliases = {
@@ -946,12 +970,46 @@ def _normalize_feature_scope(model_key: str, settings: dict[str, Any] | None = N
         "x_cond_only": "x_cond_only",
         "cond_only": "x_cond_only",
         "cond": "x_cond_only",
+        "x_op+x_eis": "x_op+x_eis",
+        "op+eis": "x_op+x_eis",
+        "x_eis+x_op": "x_op+x_eis",
+        "eis+op": "x_op+x_eis",
+        "x_op+x_cond": "x_op+x_cond",
+        "op+cond": "x_op+x_cond",
+        "x_cond+x_op": "x_op+x_cond",
+        "cond+op": "x_op+x_cond",
+        "x_eis+x_cond": "x_eis+x_cond",
+        "eis+cond": "x_eis+x_cond",
+        "x_cond+x_eis": "x_eis+x_cond",
+        "cond+eis": "x_eis+x_cond",
         "all": "all_modalities",
         "all_modalities": "all_modalities",
         "x_op+x_eis+x_cond": "all_modalities",
         "multimodal": "all_modalities",
     }
     return aliases.get(raw_scope, raw_scope)
+
+
+def _feature_scope_modalities(feature_scope: str) -> tuple[bool, bool, bool]:
+    if feature_scope == "all_modalities":
+        return True, True, True
+    if feature_scope == "x_op_only":
+        return True, False, False
+    if feature_scope == "x_eis_only":
+        return False, True, False
+    if feature_scope == "x_cond_only":
+        return False, False, True
+    if feature_scope == "x_op+x_eis":
+        return True, True, False
+    if feature_scope == "x_op+x_cond":
+        return True, False, True
+    if feature_scope == "x_eis+x_cond":
+        return False, True, True
+    raise ValueError(
+        f"不支持 feature_scope={feature_scope!r}; "
+        "目前支持 all_modalities、x_op_only、x_eis_only、x_cond_only、"
+        "x_op+x_eis、x_op+x_cond 和 x_eis+x_cond"
+    )
 
 
 def _flatten_split_for_model(
@@ -1012,6 +1070,78 @@ def _flatten_split_for_model(
     return features, labels
 
 
+def _segment_statistics_features(values: np.ndarray[Any, Any], statistics: Iterable[str]) -> np.ndarray[Any, Any]:
+    flattened = np.asarray(values, dtype=np.float32).reshape(values.shape[0], -1)
+    parts: list[np.ndarray[Any, Any]] = []
+    for statistic in statistics:
+        normalized = str(statistic).strip().lower()
+        if normalized == "mean":
+            parts.append(flattened.mean(axis=0))
+        elif normalized == "std":
+            parts.append(flattened.std(axis=0))
+        elif normalized == "min":
+            parts.append(flattened.min(axis=0))
+        elif normalized == "max":
+            parts.append(flattened.max(axis=0))
+        elif normalized == "median":
+            parts.append(np.median(flattened, axis=0))
+        else:
+            raise ValueError(f"不支持 segment statistic: {statistic!r}")
+    return np.concatenate(parts, axis=0).astype(np.float32)
+
+
+def _segment_level_split_for_model(
+    npz_path: Path,
+    split_value: int,
+    model_key: str,
+    settings: dict[str, Any] | None = None,
+) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    data = np.load(npz_path)
+    if "group_ids" not in data:
+        raise ValueError(f"{npz_path} 缺少 group_ids，无法构建非窗口段级 baseline")
+    split = np.asarray(data["split"], dtype=np.int64)
+    indices = np.where(split == int(split_value))[0]
+    cond_key = "x_cond" if "x_cond" in data else "cond"
+    label_key = "labels" if "labels" in data else "y"
+    labels_all = np.asarray(data[label_key], dtype=np.int64)
+    group_ids = np.asarray(data["group_ids"], dtype=np.int64)
+    feature_scope = _normalize_feature_scope(model_key, settings)
+    use_x_op, use_x_eis, use_x_cond = _feature_scope_modalities(feature_scope)
+    statistics = list((settings or {}).get("segment_statistics", ["mean", "std"]))
+    rows: list[np.ndarray[Any, Any]] = []
+    labels: list[int] = []
+    for group_id in sorted(np.unique(group_ids[indices]).tolist()):
+        group_indices = indices[group_ids[indices] == group_id]
+        group_labels = labels_all[group_indices]
+        unique_labels = np.unique(group_labels)
+        if unique_labels.shape[0] != 1:
+            raise ValueError(f"group_id={group_id} contains multiple labels: {unique_labels.tolist()}")
+        parts: list[np.ndarray[Any, Any]] = []
+        if use_x_op:
+            parts.append(_segment_statistics_features(np.asarray(data["x_op"][group_indices], dtype=np.float32), statistics))
+        if use_x_eis:
+            parts.append(_segment_statistics_features(np.asarray(data["x_eis"][group_indices], dtype=np.float32), statistics))
+        if use_x_cond:
+            parts.append(_segment_statistics_features(np.asarray(data[cond_key][group_indices], dtype=np.float32), statistics))
+        rows.append(np.concatenate(parts, axis=0).astype(np.float32))
+        labels.append(int(unique_labels[0]))
+    if not rows:
+        raise ValueError(f"{npz_path} 没有 split={split_value} 的段级样本")
+    return np.vstack(rows).astype(np.float32), np.asarray(labels, dtype=np.int64)
+
+
+def feature_split_for_model(
+    npz_path: Path,
+    split_value: int,
+    model_key: str,
+    settings: dict[str, Any] | None = None,
+) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    input_protocol = str((settings or {}).get("input_protocol", "window_flatten")).strip().lower()
+    if input_protocol in {"segment_level_non_window", "segment-level-non-window", "non_window_segment"}:
+        return _segment_level_split_for_model(npz_path, split_value, model_key, settings)
+    return _flatten_split_for_model(npz_path, split_value, model_key, settings)
+
+
 def _flatten_split_all_modalities(npz_path: Path, split_value: int) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
     data = np.load(npz_path)
     split = np.asarray(data["split"], dtype=np.int64)
@@ -1064,38 +1194,25 @@ def _scope_torch_dataset_features(dataset: Any, model_key: str, settings: dict[s
     feature_scope = _normalize_feature_scope(model_key, settings)
     if feature_scope == "all_modalities":
         return dataset
-    if feature_scope == "x_op_only":
-        return _ScopedTorchFeatureDataset(dataset, use_x_op=True, use_x_eis=False, use_x_cond=False)
-    if feature_scope == "x_eis_only":
-        return _ScopedTorchFeatureDataset(dataset, use_x_op=False, use_x_eis=True, use_x_cond=False)
-    if feature_scope == "x_cond_only":
-        return _ScopedTorchFeatureDataset(dataset, use_x_op=False, use_x_eis=False, use_x_cond=True)
-    raise ValueError(
-        f"torch baseline 不支持 feature_scope={feature_scope!r}; "
-        "目前支持 all_modalities、x_op_only、x_eis_only 和 x_cond_only"
-    )
+    use_x_op, use_x_eis, use_x_cond = _feature_scope_modalities(feature_scope)
+    return _ScopedTorchFeatureDataset(dataset, use_x_op=use_x_op, use_x_eis=use_x_eis, use_x_cond=use_x_cond)
 
 
 def _scope_torch_npz_features(npz_path: Path, output_dir: Path, model_key: str, settings: dict[str, Any] | None = None) -> Path:
     feature_scope = _normalize_feature_scope(model_key, settings)
     if feature_scope == "all_modalities":
         return npz_path
-    supported_scopes = {"x_op_only", "x_eis_only", "x_cond_only"}
-    if feature_scope not in supported_scopes:
-        raise ValueError(
-            f"torch baseline 不支持 feature_scope={feature_scope!r}; "
-            "目前支持 all_modalities、x_op_only、x_eis_only 和 x_cond_only"
-        )
+    use_x_op, use_x_eis, use_x_cond = _feature_scope_modalities(feature_scope)
     output_dir.mkdir(parents=True, exist_ok=True)
     scoped_path = output_dir / f"{npz_path.stem}.{feature_scope}.npz"
     with np.load(npz_path) as data:
         arrays = {key: data[key] for key in data.files}
-    if feature_scope != "x_op_only" and "x_op" in arrays:
+    if not use_x_op and "x_op" in arrays:
         arrays["x_op"] = np.zeros_like(arrays["x_op"])
-    if feature_scope != "x_eis_only" and "x_eis" in arrays:
+    if not use_x_eis and "x_eis" in arrays:
         arrays["x_eis"] = np.zeros_like(arrays["x_eis"])
     cond_key = "x_cond" if "x_cond" in arrays else "cond"
-    if feature_scope != "x_cond_only" and cond_key in arrays:
+    if not use_x_cond and cond_key in arrays:
         arrays[cond_key] = np.zeros_like(arrays[cond_key])
     np.savez_compressed(scoped_path, **arrays)
     return scoped_path
@@ -1126,6 +1243,48 @@ def _build_ml_model_from_settings(model_key: str, settings: dict[str, Any]) -> A
         steps.append(("scaler", StandardScaler()))
     if pca_components is not None:
         steps.append(("pca", PCA(n_components=pca_components)))
+    if model_key == "xgboost":
+        try:
+            from xgboost import XGBClassifier
+        except ImportError as exc:
+            raise ImportError("xgboost baseline requires package 'xgboost'. Please install xgboost in the active environment.") from exc
+        classifier = XGBClassifier(
+            n_estimators=int(settings.get("n_estimators", 200)),
+            max_depth=int(settings.get("max_depth", 4)),
+            learning_rate=float(settings.get("learning_rate", 0.05)),
+            subsample=float(settings.get("subsample", 0.9)),
+            colsample_bytree=float(settings.get("colsample_bytree", 0.9)),
+            objective=str(settings.get("objective", "multi:softprob")),
+            eval_metric=str(settings.get("eval_metric", "mlogloss")),
+            tree_method=str(settings.get("tree_method", "hist")),
+            random_state=int(settings.get("random_state", 44)),
+            n_jobs=-1,
+        )
+        if not steps:
+            return classifier
+        steps.append(("classifier", classifier))
+        return Pipeline(steps)
+    if model_key == "lightgbm":
+        try:
+            from lightgbm import LGBMClassifier
+        except ImportError as exc:
+            raise ImportError("lightgbm baseline requires package 'lightgbm'. Please install lightgbm in the active environment.") from exc
+        classifier = LGBMClassifier(
+            n_estimators=int(settings.get("n_estimators", 200)),
+            max_depth=int(settings.get("max_depth", -1)),
+            num_leaves=int(settings.get("num_leaves", 31)),
+            learning_rate=float(settings.get("learning_rate", 0.05)),
+            subsample=float(settings.get("subsample", 0.9)),
+            colsample_bytree=float(settings.get("colsample_bytree", 0.9)),
+            objective=str(settings.get("objective", "multiclass")),
+            random_state=int(settings.get("random_state", 44)),
+            n_jobs=-1,
+            verbose=-1,
+        )
+        if not steps:
+            return classifier
+        steps.append(("classifier", classifier))
+        return Pipeline(steps)
     if model_key == "logreg":
         classifier = LogisticRegression(
             C=float(settings.get("C", 1.0)),
@@ -1218,8 +1377,8 @@ def _train_and_evaluate(
     noise_rows: list[dict[str, Any]] = []
     modality_rows: list[dict[str, Any]] = []
     fresh_clean_by_model: dict[str, dict[str, Any]] = dict(clean_by_model)
-    ml_models = {"logreg", "svm", "random_forest"}
-    torch_models = {"mlp", "cnn1d", "lstm", "transformer", "itransformer"}
+    ml_models = {"xgboost", "lightgbm", "logreg", "svm", "random_forest"}
+    torch_models = {"mlp", "cnn1d", "tcn", "cnn_bilstm_attention", "lstm", "autoformer", "transformer", "itransformer"}
     comparison_artifact_root = ROOT / str(args.comparison_artifact_root) / ratio_key
 
     trained_models: dict[str, Any] = {}
@@ -1233,7 +1392,7 @@ def _train_and_evaluate(
             if bool(args.strict_comparison_artifacts):
                 model = load_comparison_ml_model_artifact(comparison_artifact_root, model_key)
             else:
-                x_train, y_train = _flatten_split_for_model(clean_npz, split_value=0, model_key=model_key, settings=settings)
+                x_train, y_train = feature_split_for_model(clean_npz, split_value=0, model_key=model_key, settings=settings)
                 model = _build_ml_model_from_settings(model_key, settings)
                 model.fit(x_train, y_train)
             trained_models[model_key] = model
@@ -1241,8 +1400,8 @@ def _train_and_evaluate(
                 x_val, y_val = _flatten_split_all_modalities(clean_npz, split_value=1)
                 x_test, y_test = _flatten_split_all_modalities(clean_eval_npz, split_value=2)
             else:
-                x_val, y_val = _flatten_split_for_model(clean_npz, split_value=1, model_key=model_key, settings=settings)
-                x_test, y_test = _flatten_split_for_model(clean_eval_npz, split_value=2, model_key=model_key, settings=settings)
+                x_val, y_val = feature_split_for_model(clean_npz, split_value=1, model_key=model_key, settings=settings)
+                x_test, y_test = feature_split_for_model(clean_eval_npz, split_value=2, model_key=model_key, settings=settings)
             import time
 
             start = time.perf_counter()
@@ -1308,6 +1467,7 @@ def _train_and_evaluate(
                     min_epochs_before_stop=int(settings.get("min_epochs_before_stop", args.min_epochs_before_stop)),
                     val_metric_smoothing=int(settings.get("val_metric_smoothing", args.val_metric_smoothing)),
                     class_weighting=str(settings.get("class_weighting", args.class_weighting)),
+                    moving_avg_kernel=int(settings.get("moving_avg_kernel", 5)),
                 )
                 checkpoint_path = output_root / "_trained_clean" / model_key / "best.ckpt"
             torch_checkpoints[model_key] = (checkpoint_path, (train_ds, num_classes, settings))
@@ -1323,6 +1483,7 @@ def _train_and_evaluate(
                     _d_model = int(settings.get("d_model", args.d_model))
                     _n_layers = int(settings.get("num_layers", args.num_layers))
                     _dropout = float(settings.get("dropout", args.dropout))
+                _moving_avg_kernel = int(settings.get("moving_avg_kernel", 5))
                 model = baseline._build_torch_model(
                     model_key,
                     train_ds,
@@ -1331,6 +1492,7 @@ def _train_and_evaluate(
                     _d_model,
                     _n_layers,
                     _dropout,
+                    _moving_avg_kernel,
                 ).to(device)
                 checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
                 model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
@@ -1429,8 +1591,8 @@ def _train_and_evaluate(
                     x_val, y_val = _flatten_split_all_modalities(clean_npz, split_value=1)
                     x_test, y_test = _flatten_split_all_modalities(npz_path, split_value=2)
                 else:
-                    x_val, y_val = _flatten_split_for_model(clean_npz, split_value=1, model_key=model_key, settings=settings)
-                    x_test, y_test = _flatten_split_for_model(npz_path, split_value=2, model_key=model_key, settings=settings)
+                    x_val, y_val = feature_split_for_model(clean_npz, split_value=1, model_key=model_key, settings=settings)
+                    x_test, y_test = feature_split_for_model(npz_path, split_value=2, model_key=model_key, settings=settings)
                 import time
 
                 start = time.perf_counter()
@@ -1465,6 +1627,7 @@ def _train_and_evaluate(
                     _d_model = int(settings.get("d_model", args.d_model))
                     _n_layers = int(settings.get("num_layers", args.num_layers))
                     _dropout = float(settings.get("dropout", args.dropout))
+                _moving_avg_kernel = int(settings.get("moving_avg_kernel", 5))
                 model = baseline._build_torch_model(
                     model_key,
                     train_ds,
@@ -1473,6 +1636,7 @@ def _train_and_evaluate(
                     _d_model,
                     _n_layers,
                     _dropout,
+                    _moving_avg_kernel,
                 ).to(device)
                 checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
                 model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)

@@ -75,6 +75,42 @@ class AblationSwitchTests(unittest.TestCase):
         self.assertEqual(ABLATIONS["no_rbf"]["overrides"]["model_name"], "official_capt_unishape_kanfusion_no_rbf")
         self.assertFalse(ABLATIONS["no_rbf"]["overrides"]["use_rbf_head"])
 
+    def test_official_ablation_variants_use_capacity_reduced_overrides(self) -> None:
+        from experiments.run_official_ablation_experiments import ABLATIONS
+
+        self.assertNotIn("overrides", ABLATIONS["full_rbf"])
+
+        expected = {
+            "no_rbf": {
+                "use_rbf_head": False,
+                "hidden_dim": 64,
+                "fusion_hidden_dim": 64,
+                "dropout": 0.3,
+            },
+            "no_kan_fusion": {
+                "use_residual_kan_fusion": False,
+                "fusion_hidden_dim": 64,
+                "dropout": 0.3,
+            },
+            "static_prototype": {
+                "use_condition_transport": False,
+                "hidden_dim": 128,
+                "fusion_hidden_dim": 128,
+                "num_rbf_centers": 4,
+                "dropout": 0.25,
+            },
+            "no_condition_input": {
+                "hidden_dim": 64,
+                "fusion_hidden_dim": 64,
+                "dropout": 0.3,
+            },
+        }
+        for variant, expected_overrides in expected.items():
+            with self.subTest(variant=variant):
+                overrides = ABLATIONS[variant].get("overrides", {})
+                for key, value in expected_overrides.items():
+                    self.assertEqual(overrides[key], value)
+
     def test_official_ablation_metric_row_excludes_class0_fields(self) -> None:
         from experiments.run_official_ablation_experiments import _copy_existing_metric_row
 

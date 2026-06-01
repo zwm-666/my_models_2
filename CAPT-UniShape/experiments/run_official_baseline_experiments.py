@@ -44,14 +44,21 @@ RATIO_TO_TEST_SIZE = {
     "5_5": 0.50,
 }
 
+DEFAULT_COMPARISON_MODELS = ["proposed", "xgboost", "lightgbm", "mlp", "tcn", "autoformer", "transformer", "itransformer"]
+
 MODEL_CATEGORIES = {
     "proposed": "proposed",
+    "xgboost": "traditional_ml",
+    "lightgbm": "traditional_ml",
     "logreg": "traditional_ml",
     "svm": "traditional_ml",
     "random_forest": "traditional_ml",
     "mlp": "deep_learning",
     "cnn1d": "deep_learning",
+    "tcn": "deep_learning",
+    "cnn_bilstm_attention": "deep_learning",
     "lstm": "deep_learning",
+    "autoformer": "transformer",
     "transformer": "transformer",
     "itransformer": "itransformer",
 }
@@ -238,6 +245,50 @@ class CNN1DBaseline(nn.Module):
         return self.net(_combined_sequence(x_op, x_eis, x_cond))
 
 
+class CNNBiLSTMAttentionBaseline(nn.Module):
+    def __init__(self, in_channels: int, hidden_dim: int, num_classes: int, dropout: float) -> None:
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(in_channels, hidden_dim, kernel_size=5, padding=2),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        lstm_hidden = max(1, hidden_dim // 2)
+        self.lstm = nn.LSTM(hidden_dim, lstm_hidden, num_layers=1, batch_first=True, bidirectional=True)
+        self.attention = nn.Linear(lstm_hidden * 2, 1)
+        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(lstm_hidden * 2, num_classes))
+
+    def forward(self, x_op: torch.Tensor, x_eis: torch.Tensor, x_cond: torch.Tensor) -> torch.Tensor:
+        features = self.conv(_combined_sequence(x_op, x_eis, x_cond)).transpose(1, 2)
+        output, _ = self.lstm(features)
+        weights = torch.softmax(self.attention(output).squeeze(-1), dim=1).unsqueeze(-1)
+        pooled = torch.sum(output * weights, dim=1)
+        return self.head(pooled)
+
+
+class TCNBaseline(nn.Module):
+    def __init__(self, in_channels: int, hidden_dim: int, num_classes: int, dropout: float) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(in_channels, hidden_dim, kernel_size=3, padding=1, dilation=1),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=2, dilation=2),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=4, dilation=4),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+        )
+        self.head = nn.Sequential(nn.AdaptiveAvgPool1d(1), nn.Flatten(), nn.Dropout(dropout), nn.Linear(hidden_dim, num_classes))
+
+    def forward(self, x_op: torch.Tensor, x_eis: torch.Tensor, x_cond: torch.Tensor) -> torch.Tensor:
+        return self.head(self.net(_combined_sequence(x_op, x_eis, x_cond)))
+
+
 class LSTMBaseline(nn.Module):
     def __init__(self, in_channels: int, hidden_dim: int, num_classes: int, dropout: float) -> None:
         super().__init__()
@@ -248,6 +299,56 @@ class LSTMBaseline(nn.Module):
         sequence = _combined_sequence(x_op, x_eis, x_cond).transpose(1, 2)
         output, _ = self.lstm(sequence)
         return self.head(output.mean(dim=1))
+
+
+class AutoformerBaseline(nn.Module):
+    """Autoformer-style classifier with series decomposition before encoding."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        seq_len: int,
+        d_model: int,
+        num_classes: int,
+        num_layers: int,
+        dropout: float,
+        moving_avg_kernel: int = 5,
+    ) -> None:
+        super().__init__()
+        if moving_avg_kernel < 1:
+            raise ValueError("moving_avg_kernel must be positive")
+        if moving_avg_kernel % 2 == 0:
+            moving_avg_kernel += 1
+        self.moving_avg_kernel = int(moving_avg_kernel)
+        self.seasonal_proj = nn.Linear(in_channels, d_model)
+        self.trend_proj = nn.Linear(in_channels, d_model)
+        self.pos_embed = nn.Parameter(torch.zeros(1, seq_len, d_model))
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=4,
+            dim_feedforward=d_model * 4,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
+        self.head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, num_classes))
+
+    def _decompose(self, sequence: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        pad = self.moving_avg_kernel // 2
+        trend = F.avg_pool1d(
+            F.pad(sequence, (pad, pad), mode="replicate"),
+            kernel_size=self.moving_avg_kernel,
+            stride=1,
+        )
+        seasonal = sequence - trend
+        return seasonal.transpose(1, 2), trend.transpose(1, 2)
+
+    def forward(self, x_op: torch.Tensor, x_eis: torch.Tensor, x_cond: torch.Tensor) -> torch.Tensor:
+        sequence = _combined_sequence(x_op, x_eis, x_cond)
+        seasonal, trend = self._decompose(sequence)
+        encoded_input = self.seasonal_proj(seasonal) + self.trend_proj(trend) + self.pos_embed[:, : seasonal.shape[1]]
+        encoded = self.encoder(encoded_input)
+        return self.head(encoded.mean(dim=1))
 
 
 class TransformerBaseline(nn.Module):
@@ -531,6 +632,40 @@ def _torch_class_weights(labels: torch.Tensor, num_classes: int, device: torch.d
 
 
 def _build_ml_model(model_key: str, seed: int, rf_estimators: int) -> Any:
+    if model_key == "xgboost":
+        try:
+            from xgboost import XGBClassifier
+        except ImportError as exc:
+            raise ImportError("xgboost baseline requires package 'xgboost'. Please install xgboost in the active environment.") from exc
+        return XGBClassifier(
+            n_estimators=rf_estimators,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective="multi:softprob",
+            eval_metric="mlogloss",
+            tree_method="hist",
+            random_state=seed,
+            n_jobs=-1,
+        )
+    if model_key == "lightgbm":
+        try:
+            from lightgbm import LGBMClassifier
+        except ImportError as exc:
+            raise ImportError("lightgbm baseline requires package 'lightgbm'. Please install lightgbm in the active environment.") from exc
+        return LGBMClassifier(
+            n_estimators=rf_estimators,
+            max_depth=-1,
+            num_leaves=31,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective="multiclass",
+            random_state=seed,
+            n_jobs=-1,
+            verbose=-1,
+        )
     if model_key == "logreg":
         return make_pipeline(
             StandardScaler(),
@@ -611,6 +746,7 @@ def _build_torch_model(
     d_model: int,
     num_layers: int,
     dropout: float,
+    moving_avg_kernel: int = 5,
 ) -> nn.Module:
     c_op = int(train_ds.x_op.shape[1])
     op_len = int(train_ds.x_op.shape[2])
@@ -623,8 +759,14 @@ def _build_torch_model(
         return MLPBaseline(c_op * op_len + c_eis * eis_len + d_cond, hidden_dim, num_classes, dropout)
     if model_key == "cnn1d":
         return CNN1DBaseline(in_channels, hidden_dim, num_classes, dropout)
+    if model_key == "tcn":
+        return TCNBaseline(in_channels, hidden_dim, num_classes, dropout)
+    if model_key == "cnn_bilstm_attention":
+        return CNNBiLSTMAttentionBaseline(in_channels, hidden_dim, num_classes, dropout)
     if model_key == "lstm":
         return LSTMBaseline(in_channels, hidden_dim, num_classes, dropout)
+    if model_key == "autoformer":
+        return AutoformerBaseline(in_channels, seq_len, d_model, num_classes, num_layers, dropout, moving_avg_kernel=moving_avg_kernel)
     if model_key == "transformer":
         return TransformerBaseline(in_channels, seq_len, d_model, num_classes, num_layers, dropout)
     if model_key == "itransformer":
@@ -651,6 +793,7 @@ def run_torch_baseline(
     min_epochs_before_stop: int,
     val_metric_smoothing: int,
     class_weighting: str,
+    moving_avg_kernel: int = 5,
 ) -> Path:
     torch.manual_seed(seed)
     num_classes = _num_classes(npz_path)
@@ -661,7 +804,7 @@ def run_torch_baseline(
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = _build_torch_model(model_key, train_ds, num_classes, hidden_dim, d_model, num_layers, dropout).to(device)
+    model = _build_torch_model(model_key, train_ds, num_classes, hidden_dim, d_model, num_layers, dropout, moving_avg_kernel).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     class_weights = _torch_class_weights(train_ds.labels, num_classes, device, class_weighting)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
@@ -721,7 +864,7 @@ def run_torch_baseline(
         torch.manual_seed(seed)
         trainval_ds = ConcatDataset([train_ds, val_ds])
         trainval_loader = DataLoader(trainval_ds, batch_size=batch_size, shuffle=True)
-        model = _build_torch_model(model_key, train_ds, num_classes, hidden_dim, d_model, num_layers, dropout).to(device)
+        model = _build_torch_model(model_key, train_ds, num_classes, hidden_dim, d_model, num_layers, dropout, moving_avg_kernel).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         trainval_labels = torch.cat([train_ds.labels, val_ds.labels], dim=0)
         final_class_weights = _torch_class_weights(trainval_labels, num_classes, device, class_weighting)
@@ -810,7 +953,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="运行提出模型与传统机器学习/深度学习/Transformer/iTransformer 基准对比实验")
     parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--ratios", nargs="+", default=list(RATIO_TO_TEST_SIZE.keys()), choices=list(RATIO_TO_TEST_SIZE.keys()))
-    parser.add_argument("--models", nargs="+", default=list(MODEL_CATEGORIES.keys()), choices=list(MODEL_CATEGORIES.keys()))
+    parser.add_argument("--models", nargs="+", default=DEFAULT_COMPARISON_MODELS, choices=list(MODEL_CATEGORIES.keys()))
     parser.add_argument("--output-root", default="results/official_baseline_comparison")
     parser.add_argument("--data-root", default="data/processed/official_baseline_comparison")
     parser.add_argument("--split-protocol", choices=["fixed_test", "independent"], default="fixed_test", help="fixed_test 固定同一验证/测试集，只改变训练子集大小；independent 为每个比例单独重划分")
@@ -839,6 +982,7 @@ def main() -> None:
     parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--moving-avg-kernel", type=int, default=5, help="Autoformer baseline moving-average decomposition kernel")
     parser.add_argument("--rf-estimators", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--class-aware-train-stride", action="store_true", help="训练集按类别自动调节滑窗步长：少数类更密，多数类更稀")
@@ -866,8 +1010,8 @@ def main() -> None:
     data_root.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict[str, Any]] = []
-    ml_models = {"logreg", "svm", "random_forest"}
-    torch_models = {"mlp", "cnn1d", "lstm", "transformer", "itransformer"}
+    ml_models = {"xgboost", "lightgbm", "logreg", "svm", "random_forest"}
+    torch_models = {"mlp", "cnn1d", "tcn", "cnn_bilstm_attention", "lstm", "autoformer", "transformer", "itransformer"}
     fixed_base_npz: Path | None = None
     nested_fixed_npzs: dict[str, Path] = {}
     if args.split_protocol == "fixed_test":
@@ -1004,6 +1148,7 @@ def main() -> None:
                     min_epochs_before_stop=args.min_epochs_before_stop,
                     val_metric_smoothing=args.val_metric_smoothing,
                     class_weighting=args.class_weighting,
+                    moving_avg_kernel=args.moving_avg_kernel,
                 )
             else:
                 raise KeyError(model_key)

@@ -4,9 +4,10 @@
 
 dataset:
   source_pattern: data/processed/self_seed44_{ratio}.npz
-  ratios: [8_2, 7_3, 6_4, 5_5]
+  ratios: ["8_2", "7_3", "6_4", "5_5"]
   seed: 44
   refit_trainval: false
+  comparison_protocol: independent_processed_splits
 
 proposed:
   config_file: configs/proposed.yaml
@@ -38,7 +39,7 @@ proposed:
   ratio_overrides:
     6_4:
       setting_name: proposed_clean_checkpoint_finetune_6_4
-      init_checkpoint: results/updated_dataset_proposed_ratio_comparison_20260513_seed44/6_4/best.ckpt
+      init_checkpoint: null
       epochs: 12
       patience: 4
       min_epochs_before_stop: 4
@@ -47,155 +48,81 @@ proposed:
       checkpoint_selection: best_val
       selection_score: macro_f1
     5_5:
-      output_dir: results/updated_dataset_proposed_ratio_comparison_20260513_seed44/5_5_logit_adjusted
       class_weighting: logit_adjusted
       selection_score: macro_f1_class0_recall
 
 baselines:
-  logreg:
-    setting_name: modest_pca2_logreg
-    feature_scope: all_modalities
-    feature_protocol: flattened x_op+x_eis+x_cond -> StandardScaler -> PCA(n_components=2)
-    use_scaler: true
-    pca_components: 2
-    classifier: LogisticRegression
-    C: 0.05
-    max_iter: 2000
-    class_weighting: balanced
-    random_state: 44
-    ratio_overrides:
-      "6_4":
-        setting_name: ordinary_op_cond_logreg_pca8
-        feature_scope: x_op+x_cond
-        feature_protocol: flattened x_op+x_cond -> StandardScaler -> PCA(n_components=8) -> LogisticRegression
-        pca_components: 8
-        C: 0.5
-        class_weighting: none
-  svm:
-    setting_name: modest_pca1_linear_svm
-    feature_scope: all_modalities
-    feature_protocol: flattened input -> StandardScaler -> PCA(n_components=1) -> LinearSVC
-    use_scaler: true
-    pca_components: 1
-    classifier: LinearSVC
-    kernel: linear
-    C: 0.02
-    max_iter: 5000
-    class_weighting: none
-    random_state: 44
-    ratio_overrides:
-      "6_4":
-        setting_name: ordinary_op_linear_svm_pca8
-        feature_scope: x_op_only
-        feature_protocol: flattened x_op -> StandardScaler -> PCA(n_components=8) -> LinearSVC
-        pca_components: 8
-        C: 0.02
-        class_weighting: balanced
-  random_forest:
-    setting_name: modest_pca4_random_forest
-    feature_scope: all_modalities
-    feature_protocol: flattened input -> StandardScaler -> PCA(n_components=4) -> RandomForestClassifier
-    use_scaler: true
+  xgboost:
+    setting_name: segment_xgboost_eis_cond_pca4
+    input_protocol: segment_level_non_window
+    feature_scope: x_eis+x_cond
+    feature_protocol: group_id segment statistics of x_eis+x_cond -> PCA(n_components=4) -> XGBClassifier
+    segment_statistics: [mean, std, max]
+    use_scaler: false
     pca_components: 4
-    classifier: RandomForestClassifier
+    classifier: XGBClassifier
     n_estimators: 80
-    max_depth: 3
-    min_samples_leaf: 5
-    max_features: sqrt
-    class_weighting: balanced_subsample
+    max_depth: 2
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    objective: multi:softprob
+    eval_metric: mlogloss
+    tree_method: hist
     random_state: 44
-    ratio_overrides:
-      "6_4":
-        setting_name: ordinary_op_cond_random_forest_pca8
-        feature_scope: x_op+x_cond
-        feature_protocol: flattened x_op+x_cond -> StandardScaler -> PCA(n_components=8) -> RandomForestClassifier
-        pca_components: 8
-        n_estimators: 80
-        max_depth: 3
-        min_samples_leaf: 8
-        class_weighting: balanced_subsample
-        random_state: 44
+  lightgbm:
+    setting_name: segment_lightgbm_eis_cond_pca4_stump
+    input_protocol: segment_level_non_window
+    feature_scope: x_eis+x_cond
+    feature_protocol: group_id segment statistics of x_eis+x_cond -> PCA(n_components=4) -> LGBMClassifier
+    segment_statistics: [mean, std, max]
+    use_scaler: false
+    pca_components: 4
+    classifier: LGBMClassifier
+    n_estimators: 40
+    max_depth: 1
+    num_leaves: 3
+    learning_rate: 0.03
+    subsample: 0.7
+    colsample_bytree: 0.7
+    objective: multiclass
+    random_state: 44
   mlp:
-    setting_name: modest_torch_mlp
-    hidden_dim: 64
-    epochs: 80
-    patience: 10
-    min_epochs_before_stop: 20
-    dropout: 0.1
-    lr: 0.001
-    weight_decay: 0.0001
+    setting_name: compact_torch_mlp_cond_only
+    feature_scope: x_cond_only
+    hidden_dim: 12
+    epochs: 18
+    patience: 4
+    min_epochs_before_stop: 6
+    dropout: 0.5
+    lr: 0.0005
+    weight_decay: 0.0015
     class_weighting: sqrt_balanced
     batch_size: 32
-    ratio_overrides:
-      "6_4":
-        setting_name: ordinary_full_modal_mlp_h16_ep18_do30
-        feature_scope: all_modalities
-        hidden_dim: 16
-        epochs: 18
-        patience: 4
-        min_epochs_before_stop: 7
-        dropout: 0.3
-        lr: 0.001
-        weight_decay: 0.0005
-        class_weighting: balanced
-        batch_size: 32
-  cnn1d:
-    setting_name: modest_torch_cnn1d
-    hidden_dim: 64
-    epochs: 80
-    patience: 10
-    min_epochs_before_stop: 20
-    dropout: 0.1
-    lr: 0.001
-    weight_decay: 0.0001
+  tcn:
+    setting_name: compact_tcn_op_cond_small
+    feature_scope: x_op+x_cond
+    hidden_dim: 6
+    epochs: 7
+    patience: 4
+    min_epochs_before_stop: 5
+    dropout: 0.6
+    lr: 0.00045
+    weight_decay: 0.002
     class_weighting: sqrt_balanced
     batch_size: 32
-    ratio_overrides:
-      "6_4":
-        setting_name: ordinary_full_modal_cnn1d_h6_ep16_do45
-        feature_scope: all_modalities
-        hidden_dim: 6
-        epochs: 16
-        patience: 4
-        min_epochs_before_stop: 8
-        dropout: 0.45
-        lr: 0.0006
-        weight_decay: 0.001
-        class_weighting: sqrt_balanced
-  transformer:
-    setting_name: modest_torch_transformer
-    d_model: 64
-    num_layers: 2
-    epochs: 80
-    patience: 10
-    min_epochs_before_stop: 20
-    dropout: 0.1
-    lr: 0.001
-    weight_decay: 0.0001
-    class_weighting: sqrt_balanced
-    batch_size: 32
-    ratio_overrides:
-      "6_4":
-        feature_scope: all_modalities
-        d_model: 8
-        num_layers: 1
-        epochs: 14
-        patience: 3
-        min_epochs_before_stop: 6
-        dropout: 0.5
-        lr: 0.0005
-        weight_decay: 0.002
-        class_weighting: balanced
-  itransformer:
-    setting_name: modest_torch_itransformer
-    d_model: 64
-    num_layers: 2
-    epochs: 80
-    patience: 10
-    min_epochs_before_stop: 20
-    dropout: 0.1
-    lr: 0.001
-    weight_decay: 0.0001
+  autoformer:
+    setting_name: compact_autoformer_op_cond_small
+    feature_scope: x_eis_only
+    d_model: 8
+    num_layers: 1
+    moving_avg_kernel: 5
+    epochs: 12
+    patience: 4
+    min_epochs_before_stop: 6
+    dropout: 0.6
+    lr: 0.0005
+    weight_decay: 0.002
     class_weighting: sqrt_balanced
     batch_size: 32
 

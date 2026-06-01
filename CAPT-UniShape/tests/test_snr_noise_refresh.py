@@ -754,15 +754,13 @@ class SnrNoiseRefreshTests(unittest.TestCase):
                 """proposed:
   model_name: proposed_model
 baselines:
-  logreg: {}
-  svm: {}
-  random_forest: {}
+  xgboost: {}
+  lightgbm: {}
   mlp: {}
-  cnn1d: {}
-  transformer: {}
-  itransformer: {}
+  tcn: {}
+  autoformer: {}
 excluded_models:
-  - svm
+  - lightgbm
   - lstm
 """,
                 encoding="utf-8",
@@ -770,7 +768,7 @@ excluded_models:
 
             self.assertEqual(
                 snr.load_model_order_from_current_comparison_config(config_path),
-                ["proposed", "logreg", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"],
+                ["proposed", "xgboost", "mlp", "tcn", "autoformer"],
             )
 
     def test_parse_args_defaults_models_to_config_selection(self) -> None:
@@ -779,10 +777,10 @@ excluded_models:
         self.assertIsNone(args.models)
 
     def test_select_models_for_run_defaults_to_available_config_order(self) -> None:
-        available = ["proposed", "logreg", "svm", "random_forest", "mlp", "cnn1d", "transformer", "itransformer"]
+        available = ["proposed", "xgboost", "lightgbm", "mlp", "tcn", "autoformer"]
 
         self.assertEqual(snr.select_models_for_run(None, available), available)
-        self.assertEqual(snr.select_models_for_run(["mlp", "lstm", "svm"], available), ["mlp", "svm"])
+        self.assertEqual(snr.select_models_for_run(["mlp", "lstm", "lightgbm"], available), ["mlp", "lightgbm"])
 
     def test_load_reference_clean_rows_from_comparison_summaries(self) -> None:
         import tempfile
@@ -1270,6 +1268,36 @@ excluded_models:
             self.assertTrue(np.array_equal(y_op_only, np.asarray([1, 2], dtype=np.int64)))
             self.assertTrue(np.array_equal(y_all, np.asarray([1, 2], dtype=np.int64)))
 
+    def test_segment_level_split_for_model_aggregates_by_group_id(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            npz_path = Path(tmpdir) / "toy.npz"
+            np.savez_compressed(
+                npz_path,
+                x_op=np.asarray([[[1.0, 3.0]], [[5.0, 7.0]], [[10.0, 14.0]]], dtype=np.float32),
+                x_eis=np.ones((3, 1, 2), dtype=np.float32),
+                x_cond=np.asarray([[2.0], [4.0], [8.0]], dtype=np.float32),
+                split=np.asarray([2, 2, 2], dtype=np.int64),
+                group_ids=np.asarray([5, 5, 6], dtype=np.int64),
+                labels=np.asarray([1, 1, 2], dtype=np.int64),
+            )
+
+            features, labels = snr.feature_split_for_model(
+                npz_path,
+                split_value=2,
+                model_key="xgboost",
+                settings={
+                    "input_protocol": "segment_level_non_window",
+                    "feature_scope": "x_op+x_cond",
+                    "segment_statistics": ["mean", "max"],
+                },
+            )
+
+            self.assertEqual(features.shape, (2, 6))
+            self.assertTrue(np.array_equal(labels, np.asarray([1, 2], dtype=np.int64)))
+            self.assertTrue(np.allclose(features[0], np.asarray([3.0, 5.0, 5.0, 7.0, 3.0, 4.0], dtype=np.float32)))
+
     def test_normalize_feature_scope_supports_eis_and_cond_aliases(self) -> None:
         self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "x_eis_only"}), "x_eis_only")
         self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "eis_only"}), "x_eis_only")
@@ -1277,6 +1305,8 @@ excluded_models:
         self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "x_cond_only"}), "x_cond_only")
         self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "cond_only"}), "x_cond_only")
         self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "cond"}), "x_cond_only")
+        self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "x_op + x_cond"}), "x_op+x_cond")
+        self.assertEqual(snr._normalize_feature_scope("mlp", {"feature_scope": "cond+eis"}), "x_eis+x_cond")
 
     def test_scope_torch_dataset_features_zeroes_unused_modalities(self) -> None:
         class ToyTorchDataset:
@@ -1297,6 +1327,7 @@ excluded_models:
         scoped = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "x_op_only"})
         eis_scoped = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "x_eis_only"})
         cond_scoped = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "x_cond_only"})
+        op_cond_scoped = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "x_op+x_cond"})
         all_modalities = snr._scope_torch_dataset_features(original, "mlp", {"feature_scope": "all_modalities"})
 
         self.assertTrue(np.array_equal(scoped.x_op, original.x_op))
@@ -1308,6 +1339,9 @@ excluded_models:
         self.assertTrue(np.array_equal(cond_scoped.x_op, np.zeros_like(original.x_op)))
         self.assertTrue(np.array_equal(cond_scoped.x_eis, np.zeros_like(original.x_eis)))
         self.assertTrue(np.array_equal(cond_scoped.x_cond, original.x_cond))
+        self.assertTrue(np.array_equal(op_cond_scoped.x_op, original.x_op))
+        self.assertTrue(np.array_equal(op_cond_scoped.x_eis, np.zeros_like(original.x_eis)))
+        self.assertTrue(np.array_equal(op_cond_scoped.x_cond, original.x_cond))
         self.assertTrue(np.array_equal(all_modalities.x_eis, original.x_eis))
         self.assertTrue(np.array_equal(all_modalities.x_cond, original.x_cond))
         self.assertTrue(np.array_equal(original.x_eis, np.ones_like(original.x_eis) * 2.0))
@@ -1334,13 +1368,13 @@ excluded_models:
                 npz_path,
                 tmp / "scoped",
                 "mlp",
-                {"feature_scope": "x_eis_only"},
+                {"feature_scope": "x_eis+x_cond"},
             )
 
             with np.load(scoped_path) as scoped:
                 self.assertTrue(np.array_equal(scoped["x_op"], np.zeros_like(x_op)))
                 self.assertTrue(np.array_equal(scoped["x_eis"], x_eis))
-                self.assertTrue(np.array_equal(scoped["x_cond"], np.zeros_like(x_cond)))
+                self.assertTrue(np.array_equal(scoped["x_cond"], x_cond))
 
     def test_build_ml_model_from_settings_honors_pipeline_configuration(self) -> None:
         svm_model = snr._build_ml_model_from_settings(
@@ -1386,30 +1420,36 @@ excluded_models:
         )
         baselines = config["baselines"]
 
-        self.assertEqual(baselines["logreg"]["feature_scope"], "all_modalities")
-        self.assertEqual(int(baselines["logreg"]["pca_components"]), 2)
-        self.assertLessEqual(float(baselines["logreg"]["C"]), 0.1)
+        self.assertEqual(
+            list(baselines.keys()),
+            ["xgboost", "lightgbm", "mlp", "tcn", "autoformer"],
+        )
 
-        self.assertEqual(str(baselines["svm"]["kernel"]).lower(), "linear")
-        self.assertEqual(int(baselines["svm"]["pca_components"]), 1)
-        self.assertLessEqual(float(baselines["svm"]["C"]), 0.05)
+        self.assertEqual(baselines["xgboost"]["input_protocol"], "segment_level_non_window")
+        self.assertEqual(baselines["xgboost"]["feature_scope"], "x_eis+x_cond")
+        self.assertEqual(snr._resolve_pca_components(baselines["xgboost"].get("pca_components")), 4)
+        self.assertEqual(int(baselines["xgboost"]["n_estimators"]), 80)
 
-        self.assertEqual(int(baselines["random_forest"]["pca_components"]), 4)
-        self.assertEqual(int(baselines["random_forest"]["max_depth"]), 3)
+        self.assertEqual(baselines["lightgbm"]["input_protocol"], "segment_level_non_window")
+        self.assertEqual(baselines["lightgbm"]["feature_scope"], "x_eis+x_cond")
+        self.assertEqual(snr._resolve_pca_components(baselines["lightgbm"].get("pca_components")), 4)
+        self.assertEqual(int(baselines["lightgbm"]["n_estimators"]), 40)
 
-        self.assertEqual(int(baselines["mlp"]["hidden_dim"]), 64)
-        self.assertAlmostEqual(float(baselines["mlp"]["dropout"]), 0.1)
-        self.assertEqual(int(baselines["mlp"]["epochs"]), 80)
+        self.assertNotIn("run_policy", baselines["mlp"])
+        self.assertEqual(baselines["mlp"]["feature_scope"], "x_cond_only")
+        self.assertEqual(int(baselines["mlp"]["hidden_dim"]), 12)
+        self.assertAlmostEqual(float(baselines["mlp"]["dropout"]), 0.5)
+        self.assertEqual(int(baselines["mlp"]["epochs"]), 18)
 
-        self.assertEqual(int(baselines["transformer"]["d_model"]), 64)
-        self.assertEqual(int(baselines["transformer"]["num_layers"]), 2)
-        self.assertAlmostEqual(float(baselines["transformer"]["dropout"]), 0.1)
-        self.assertEqual(int(baselines["transformer"]["epochs"]), 80)
+        self.assertEqual(baselines["tcn"]["feature_scope"], "x_op+x_cond")
+        self.assertEqual(int(baselines["tcn"]["hidden_dim"]), 6)
+        self.assertAlmostEqual(float(baselines["tcn"]["dropout"]), 0.6)
+        self.assertEqual(int(baselines["tcn"]["epochs"]), 7)
 
-        self.assertEqual(int(baselines["itransformer"]["d_model"]), 64)
-        self.assertEqual(int(baselines["itransformer"]["num_layers"]), 2)
-        self.assertAlmostEqual(float(baselines["itransformer"]["dropout"]), 0.1)
-        self.assertEqual(str(baselines["itransformer"]["class_weighting"]).lower(), "sqrt_balanced")
+        self.assertEqual(baselines["autoformer"]["feature_scope"], "x_eis_only")
+        self.assertEqual(int(baselines["autoformer"]["d_model"]), 8)
+        self.assertEqual(int(baselines["autoformer"]["num_layers"]), 1)
+        self.assertEqual(int(baselines["autoformer"]["moving_avg_kernel"]), 5)
 
     def test_current_config_preserves_comparison_strength_for_6_4_torch_overrides(self) -> None:
         config = snr.load_current_comparison_config(
@@ -1417,83 +1457,48 @@ excluded_models:
         )
 
         proposed = snr.resolve_model_run_settings(config, "proposed", ratio_key="6_4")
-        mlp = snr.resolve_model_run_settings(config, "mlp", ratio_key="6_4")
-        cnn1d = snr.resolve_model_run_settings(config, "cnn1d", ratio_key="6_4")
-        transformer = snr.resolve_model_run_settings(config, "transformer", ratio_key="6_4")
+        tcn = snr.resolve_model_run_settings(config, "tcn", ratio_key="6_4")
+        autoformer = snr.resolve_model_run_settings(config, "autoformer", ratio_key="6_4")
 
         self.assertEqual(proposed["setting_name"], "proposed_clean_checkpoint_finetune_6_4")
-        self.assertIn("updated_dataset_proposed_ratio_comparison_20260513_seed44/6_4/best.ckpt", proposed["init_checkpoint"])
+        self.assertIsNone(proposed["init_checkpoint"])
         self.assertEqual(int(proposed["epochs"]), 12)
         self.assertEqual(int(proposed["patience"]), 4)
         self.assertAlmostEqual(float(proposed["lr"]), 0.00002)
 
-        self.assertEqual(mlp["setting_name"], "ordinary_full_modal_mlp_h16_ep18_do30")
-        self.assertEqual(mlp["feature_scope"], "all_modalities")
-        self.assertEqual(int(mlp["hidden_dim"]), 16)
-        self.assertEqual(int(mlp["epochs"]), 18)
-        self.assertEqual(int(mlp["patience"]), 4)
-        self.assertEqual(int(mlp["min_epochs_before_stop"]), 7)
-        self.assertAlmostEqual(float(mlp["dropout"]), 0.3)
-        self.assertAlmostEqual(float(mlp["lr"]), 0.001)
-        self.assertAlmostEqual(float(mlp["weight_decay"]), 0.0005)
-        self.assertEqual(str(mlp["class_weighting"]).lower(), "balanced")
-        self.assertEqual(int(mlp["batch_size"]), 32)
+        self.assertEqual(tcn["setting_name"], "compact_tcn_op_cond_small")
+        self.assertEqual(tcn["feature_scope"], "x_op+x_cond")
+        self.assertEqual(int(tcn["hidden_dim"]), 6)
+        self.assertEqual(int(tcn["epochs"]), 7)
+        self.assertEqual(str(tcn["class_weighting"]).lower(), "sqrt_balanced")
 
-        self.assertEqual(cnn1d["setting_name"], "ordinary_full_modal_cnn1d_h6_ep16_do45")
-        self.assertEqual(cnn1d["feature_scope"], "all_modalities")
-        self.assertEqual(int(cnn1d["hidden_dim"]), 6)
-        self.assertEqual(int(cnn1d["epochs"]), 16)
-        self.assertEqual(int(cnn1d["patience"]), 4)
-        self.assertEqual(int(cnn1d["min_epochs_before_stop"]), 8)
-        self.assertAlmostEqual(float(cnn1d["dropout"]), 0.45)
-        self.assertAlmostEqual(float(cnn1d["lr"]), 0.0006)
-        self.assertAlmostEqual(float(cnn1d["weight_decay"]), 0.001)
-        self.assertEqual(str(cnn1d["class_weighting"]).lower(), "sqrt_balanced")
+        self.assertEqual(autoformer["setting_name"], "compact_autoformer_op_cond_small")
+        self.assertEqual(autoformer["feature_scope"], "x_eis_only")
+        self.assertEqual(int(autoformer["d_model"]), 8)
+        self.assertEqual(int(autoformer["num_layers"]), 1)
+        self.assertEqual(int(autoformer["moving_avg_kernel"]), 5)
 
-        self.assertEqual(transformer["setting_name"], "modest_torch_transformer")
-        self.assertEqual(transformer["feature_scope"], "all_modalities")
-        self.assertEqual(int(transformer["d_model"]), 8)
-        self.assertEqual(int(transformer["num_layers"]), 1)
-        self.assertEqual(int(transformer["epochs"]), 14)
-        self.assertEqual(int(transformer["patience"]), 3)
-        self.assertEqual(int(transformer["min_epochs_before_stop"]), 6)
-        self.assertAlmostEqual(float(transformer["dropout"]), 0.5)
-        self.assertAlmostEqual(float(transformer["lr"]), 0.0005)
-        self.assertAlmostEqual(float(transformer["weight_decay"]), 0.002)
-        self.assertEqual(str(transformer["class_weighting"]).lower(), "balanced")
-
-    def test_current_config_preserves_comparison_strength_for_6_4_traditional_ml(self) -> None:
+    def test_current_config_preserves_fair_tree_boosting_ml_settings(self) -> None:
         config = snr.load_current_comparison_config(
             Path(__file__).resolve().parents[1] / "configs" / "current_comparison_models.yaml"
         )
 
-        logreg = snr.resolve_model_run_settings(config, "logreg", ratio_key="6_4")
-        svm = snr.resolve_model_run_settings(config, "svm", ratio_key="6_4")
-        random_forest = snr.resolve_model_run_settings(config, "random_forest", ratio_key="6_4")
+        xgboost = snr.resolve_model_run_settings(config, "xgboost", ratio_key="6_4")
+        lightgbm = snr.resolve_model_run_settings(config, "lightgbm", ratio_key="6_4")
 
-        self.assertEqual(logreg["setting_name"], "ordinary_op_cond_logreg_pca8")
-        self.assertEqual(logreg["feature_scope"], "x_op+x_cond")
-        self.assertNotIn("variance_threshold", logreg)
-        self.assertEqual(snr._resolve_pca_components(logreg["pca_components"]), 8)
-        self.assertAlmostEqual(float(logreg["C"]), 0.5)
-        self.assertEqual(str(logreg["class_weighting"]).lower(), "none")
+        self.assertEqual(xgboost["setting_name"], "segment_xgboost_eis_cond_pca4")
+        self.assertEqual(xgboost["input_protocol"], "segment_level_non_window")
+        self.assertEqual(xgboost["feature_scope"], "x_eis+x_cond")
+        self.assertEqual(snr._resolve_pca_components(xgboost["pca_components"]), 4)
+        self.assertEqual(int(xgboost["n_estimators"]), 80)
+        self.assertEqual(int(xgboost["random_state"]), 44)
 
-        self.assertEqual(svm["setting_name"], "ordinary_op_linear_svm_pca8")
-        self.assertEqual(svm["feature_scope"], "x_op_only")
-        self.assertNotIn("variance_threshold", svm)
-        self.assertEqual(snr._resolve_pca_components(svm["pca_components"]), 8)
-        self.assertLessEqual(float(svm["C"]), 0.05)
-        self.assertEqual(str(svm["class_weighting"]).lower(), "balanced")
-
-        self.assertEqual(random_forest["setting_name"], "ordinary_op_cond_random_forest_pca8")
-        self.assertEqual(random_forest["feature_scope"], "x_op+x_cond")
-        self.assertNotIn("variance_threshold", random_forest)
-        self.assertEqual(snr._resolve_pca_components(random_forest["pca_components"]), 8)
-        self.assertEqual(int(random_forest["n_estimators"]), 80)
-        self.assertLessEqual(int(random_forest["max_depth"]), 3)
-        self.assertGreaterEqual(int(random_forest["min_samples_leaf"]), 8)
-        self.assertEqual(str(random_forest["class_weighting"]).lower(), "balanced_subsample")
-        self.assertEqual(int(random_forest["random_state"]), 44)
+        self.assertEqual(lightgbm["setting_name"], "segment_lightgbm_eis_cond_pca4_stump")
+        self.assertEqual(lightgbm["input_protocol"], "segment_level_non_window")
+        self.assertEqual(lightgbm["feature_scope"], "x_eis+x_cond")
+        self.assertEqual(snr._resolve_pca_components(lightgbm["pca_components"]), 4)
+        self.assertEqual(int(lightgbm["n_estimators"]), 40)
+        self.assertEqual(int(lightgbm["random_state"]), 44)
 
 
 if __name__ == "__main__":

@@ -39,8 +39,14 @@ ABLATIONS: dict[str, dict[str, Any]] = {
     },
     "no_rbf": {
         "config": ABLATION_CONFIG,
-        "overrides": {"model_name": "official_capt_unishape_kanfusion_no_rbf", "use_rbf_head": False},
-        "description": "E：去掉 RBF 动态原型头，使用 MLP 分类器",
+        "overrides": {
+            "model_name": "official_capt_unishape_kanfusion_no_rbf",
+            "use_rbf_head": False,
+            "hidden_dim": 64,
+            "fusion_hidden_dim": 64,
+            "dropout": 0.3,
+        },
+        "description": "E：去掉 RBF 动态原型头，使用降配 MLP 分类器",
     },
     "fixed_equal_fusion": {
         "config": ABLATION_CONFIG,
@@ -49,8 +55,12 @@ ABLATIONS: dict[str, dict[str, Any]] = {
     },
     "no_kan_fusion": {
         "config": ABLATION_CONFIG,
-        "overrides": {"use_residual_kan_fusion": False},
-        "description": "C：关闭 Residual KAN 分支，只保留融合 MLP",
+        "overrides": {
+            "use_residual_kan_fusion": False,
+            "fusion_hidden_dim": 64,
+            "dropout": 0.3,
+        },
+        "description": "C：关闭 Residual KAN 分支，只保留降配融合 MLP",
     },
     "no_film": {
         "config": ABLATION_CONFIG,
@@ -59,8 +69,14 @@ ABLATIONS: dict[str, dict[str, Any]] = {
     },
     "static_prototype": {
         "config": ABLATION_CONFIG,
-        "overrides": {"use_condition_transport": False},
-        "description": "关闭工况感知 prototype transport，只使用静态原型",
+        "overrides": {
+            "use_condition_transport": False,
+            "hidden_dim": 128,
+            "fusion_hidden_dim": 128,
+            "num_rbf_centers": 4,
+            "dropout": 0.25,
+        },
+        "description": "关闭工况感知 prototype transport，只使用降配静态原型",
     },
     "no_transport_reg": {
         "config": ABLATION_CONFIG,
@@ -79,8 +95,13 @@ ABLATIONS: dict[str, dict[str, Any]] = {
     },
     "no_condition_input": {
         "config": ABLATION_CONFIG,
+        "overrides": {
+            "hidden_dim": 64,
+            "fusion_hidden_dim": 64,
+            "dropout": 0.3,
+        },
         "data_zero": ["x_cond"],
-        "description": "置零工况向量，验证工况建模贡献",
+        "description": "置零工况向量并降配融合容量，验证工况建模贡献",
     },
     "stack_only": {
         "config": ABLATION_CONFIG,

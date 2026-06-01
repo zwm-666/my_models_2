@@ -24,7 +24,10 @@ SPLIT_TO_VALUE = {"train": 0, "val": 1, "test": 2}
 BASELINE_DISPLAY_NAMES = {
     "mlp": "MLP",
     "cnn1d": "CNN1D",
+    "tcn": "TCN",
+    "cnn_bilstm_attention": "CNN-BiLSTM-Attention",
     "lstm": "LSTM",
+    "autoformer": "Autoformer",
     "transformer": "Transformer",
     "itransformer": "iTransformer",
 }
@@ -412,12 +415,29 @@ def extract_torch_baseline_features(model: Any, model_key: str, x_op: Any, x_eis
         from experiments.run_official_baseline_experiments import _combined_sequence
 
         return model.net[:-1](_combined_sequence(x_op, x_eis, x_cond))
+    if normalized == "cnn_bilstm_attention":
+        from experiments.run_official_baseline_experiments import _combined_sequence
+
+        sequence = model.conv(_combined_sequence(x_op, x_eis, x_cond)).transpose(1, 2)
+        output, _ = model.lstm(sequence)
+        weights = torch.softmax(model.attention(output).squeeze(-1), dim=1).unsqueeze(-1)
+        return torch.sum(output * weights, dim=1)
+    if normalized == "tcn":
+        from experiments.run_official_baseline_experiments import _combined_sequence
+
+        return model.net(_combined_sequence(x_op, x_eis, x_cond)).mean(dim=2)
     if normalized == "lstm":
         from experiments.run_official_baseline_experiments import _combined_sequence
 
         sequence = _combined_sequence(x_op, x_eis, x_cond).transpose(1, 2)
         output, _ = model.lstm(sequence)
         return output.mean(dim=1)
+    if normalized == "autoformer":
+        from experiments.run_official_baseline_experiments import _combined_sequence
+
+        seasonal, trend = model._decompose(_combined_sequence(x_op, x_eis, x_cond))
+        encoded_input = model.seasonal_proj(seasonal) + model.trend_proj(trend) + model.pos_embed[:, : seasonal.shape[1]]
+        return model.encoder(encoded_input).mean(dim=1)
     if normalized == "transformer":
         from experiments.run_official_baseline_experiments import _combined_sequence
 
@@ -678,7 +698,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--panel-caption", action=argparse.BooleanOptionalAction, default=False)
 
     parser.add_argument("--baseline-checkpoint", default=None, help="Torch 基线 best.ckpt；不提供则跳过基线面板")
-    parser.add_argument("--baseline-model-key", default=None, help="mlp/cnn1d/lstm/transformer/itransformer；默认从 checkpoint 或目录名推断")
+    parser.add_argument("--baseline-model-key", default=None, help="mlp/cnn1d/tcn/cnn_bilstm_attention/lstm/autoformer/transformer/itransformer；默认从 checkpoint 或目录名推断")
     parser.add_argument("--baseline-hidden-dim", type=int, default=64)
     parser.add_argument("--baseline-d-model", type=int, default=64)
     parser.add_argument("--baseline-num-layers", type=int, default=2)

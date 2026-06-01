@@ -183,23 +183,21 @@ def plot_shape_analysis(
     source_note: str,
 ) -> None:
     import matplotlib.pyplot as plt
-
-    plt.rcParams.update(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Arial", "SimHei", "Microsoft YaHei", "DejaVu Sans", "sans-serif"],
-            "axes.spines.right": False,
-            "axes.spines.top": False,
-            "axes.linewidth": 0.8,
-            "font.size": 8,
-            "pdf.fonttype": 42,
-            "svg.fonttype": "none",
-        }
+    from outputs.paper_figures.plot_style import (
+        LEGEND_KWARGS,
+        TOP_LEGEND_ANCHOR_Y,
+        add_panel_tag,
+        apply_paper_style,
+        save_paper_figure,
+        style_axes,
+        style_legend_frame,
     )
+
+    apply_paper_style()
     colors = {0: "#4C78A8", 1: "#F58518", 2: "#54A24B"}
     label_names = {idx: name for idx, name in enumerate(CLASS_DISPLAY_NAMES)}
     x_axis = np.linspace(0.0, 1.0, x_eis.shape[2], dtype=np.float32)
-    fig, axes = plt.subplots(2, 2, figsize=(7.1, 4.8), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=(7.1, 4.8))
     for ax, channel, panel in zip(axes.ravel(), [0, 1, 2, 3], ["(a)", "(b)", "(c)", "(d)"]):
         stats = classwise_mean_std(x_eis[:, channel, :], labels)
         for label, item in stats.items():
@@ -208,28 +206,28 @@ def plot_shape_analysis(
             color = colors.get(label, "#777777")
             ax.plot(x_axis, mean, color=color, linewidth=1.6, label=f"{label_names.get(label, label)} (n={item['count']})")
             ax.fill_between(x_axis, mean - std, mean + std, color=color, alpha=0.15, linewidth=0)
-        ax.text(
-            PANEL_LABEL_KWARGS["x"],
-            PANEL_LABEL_KWARGS["y"],
-            panel,
-            transform=ax.transAxes,
-            fontweight=PANEL_LABEL_KWARGS["fontweight"],
-        )
+        add_panel_tag(ax, panel)
         ax.set_xlabel("Normalized statistic coordinate")
         ax.set_ylabel(CHANNEL_NAMES[channel])
-        ax.grid(True, color="#D9D9D9", linewidth=0.45, alpha=0.7)
+        ax.set_xlim(0.0, 1.0)
+        ax.set_xticks(np.linspace(0.0, 1.0, 6))
+        ax.margins(x=0)
+        style_axes(ax, grid_axis="both")
     handles, labels_text = axes.ravel()[0].get_legend_handles_labels()
-    fig.legend(handles, labels_text, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.04))
-    fig.text(
-        0.01,
-        -0.02,
-        f"Split: {split_name}. Source: {source_note}. x_eis is a constructed impedance-statistic shape sequence, not raw full-frequency EIS spectra.",
-        fontsize=7,
+    legend = fig.legend(
+        handles,
+        labels_text,
+        loc="lower center",
+        ncol=3,
+        bbox_to_anchor=(0.5, TOP_LEGEND_ANCHOR_Y),
+        handlelength=1.8,
+        columnspacing=1.6,
+        **LEGEND_KWARGS,
     )
+    style_legend_frame(legend)
+    fig.subplots_adjust(left=0.11, right=0.985, top=0.80, bottom=0.12, wspace=0.22, hspace=0.48)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=600, bbox_inches="tight")
-    fig.savefig(output_path.with_suffix(".svg"), bbox_inches="tight")
-    fig.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight")
+    save_paper_figure(fig, str(output_path.with_suffix("")), formats=("svg", "png"))
     plt.close(fig)
 
 
