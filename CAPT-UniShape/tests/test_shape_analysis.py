@@ -179,6 +179,34 @@ class ShapeAnalysisTests(unittest.TestCase):
         self.assertEqual(names, ["Total impedance", "EIS resistance real", "EIS resistance imaginary"])
         self.assertTrue(all(all(ord(ch) < 128 for ch in name) for name in names))
 
+    def test_condition_candidate_columns_exclude_model_input_sources(self) -> None:
+        import pandas as pd
+
+        from experiments.plot_condition_selection import condition_candidate_columns
+
+        frame = pd.DataFrame(
+            {
+                "测试时间": ["2026-01-01"],
+                "label": [0],
+                "总阻抗": [1.0],
+                "电堆总电压": [2.0],
+                "进堆空压": [3.0],
+                "出堆水温": [4.0],
+                "__label__": [0],
+                "note": ["x"],
+            }
+        )
+
+        self.assertEqual(condition_candidate_columns(frame), ["进堆空压", "出堆水温"])
+
+    def test_condition_display_names_are_english(self) -> None:
+        from experiments.plot_condition_selection import english_condition_names
+
+        names = english_condition_names(["进堆空压", "氢压差", "FC空压机出口温度"])
+
+        self.assertEqual(names, ["Air inlet pressure", "Hydrogen pressure drop", "Compressor outlet temperature"])
+        self.assertTrue(all(all(ord(ch) < 128 for ch in name) for name in names))
+
 
 if __name__ == "__main__":
     unittest.main()
