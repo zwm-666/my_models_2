@@ -23,8 +23,10 @@ if str(STYLE_DIR) not in sys.path:
     sys.path.insert(0, str(STYLE_DIR))
 
 from experiments.build_official_npz_from_self_excel import (  # noqa: E402
+    COND_COLS,
     EIS_COLS,
     LABEL_COL,
+    STACK_COLS,
     TIME_COL,
     _choose_group_split,
     _derive_group_keys,
@@ -34,16 +36,18 @@ from experiments.build_official_npz_from_self_excel import (  # noqa: E402
 from plot_style import (  # noqa: E402
     CM,
     FONT_SIZE,
+    FULL_FIG_WIDTH_CM,
     LEGEND_KWARGS,
     MODEL_COLORS,
     PANEL_TAG_POSITION,
     apply_paper_style,
+    save_paper_figure,
     style_axes,
     style_legend_frame,
 )
 
 
-CLASS_ORDER = [2, 0, 1]
+CLASS_ORDER = [0, 2, 1]
 CLASS_COLORS = {2: MODEL_COLORS[3], 0: MODEL_COLORS[0], 1: MODEL_COLORS[2]}
 CLASS_NAMES = {0: "Normal", 1: "Flooding", 2: "Drying"}
 LABEL_ALIASES = [LABEL_COL, "类型", "label", "Label", "标签"]
@@ -57,6 +61,16 @@ FEATURE_NAME_EN = {
     "标准差": "Standard deviation",
     "EIS电阻实部": "EIS resistance real",
     "EIS电阻虚部": "EIS resistance imaginary",
+    "电堆总电压": "Stack voltage",
+    "电堆总电流": "Stack current",
+    "电堆功率": "Stack power",
+    "进堆空压": "Air inlet pressure",
+    "出堆水温": "Water outlet temperature",
+    "高压水泵转速FK": "Water pump speed",
+    "氢压差": "Hydrogen pressure drop",
+    "空压差": "Air pressure drop",
+    "水温升": "Water temperature rise",
+    "FC空压机出口温度": "Compressor outlet temperature",
 }
 
 
@@ -194,6 +208,125 @@ def build_eis_window_features(
     )
 
 
+def build_window_mean_features(
+    *,
+    excel_path: Path,
+    sheet_name: str,
+    feature_columns: list[str],
+    window_size: int,
+    stride_train: int,
+    stride_val: int,
+    stride_eval: int,
+    split_mode: str,
+    segment_gap_seconds: float,
+    segment_block_seconds: float,
+    segment_label_boundary: bool,
+    random_state: int,
+    test_size: float,
+    val_size: float,
+    group_split_strategy: str,
+    split_retries: int,
+    normalization_label: str,
+) -> tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.int64]], np.ndarray[Any, np.dtype[np.int64]], dict[str, Any]]:
+    frame = _read_excel_with_labels(excel_path, sheet_name)
+    missing = set(feature_columns + [TIME_COL, LABEL_COL]) - set(frame.columns)
+    if missing:
+        raise ValueError(f"Missing expected columns in Excel: {sorted(missing)}")
+    frame = frame.copy()
+    if split_mode == "segment":
+        frame["__group_key__"] = _derive_segment_group_keys(
+            frame,
+            gap_seconds=float(segment_gap_seconds),
+            block_seconds=float(segment_block_seconds),
+            label_boundary=bool(segment_label_boundary),
+        )
+    else:
+        frame["__group_key__"] = _derive_group_keys(pd.Series(frame[TIME_COL].to_numpy()), split_mode)
+
+    groups = np.asarray(frame["__group_key__"].unique())
+    group_label_map = frame.groupby("__group_key__")[LABEL_COL].first()
+    group_labels = np.array([group_label_map[group] for group in groups])
+    row_counts = {group: int(count) for group, count in frame.groupby("__group_key__").size().items()}
+    train_groups, val_groups, test_groups, split_quality = _choose_group_split(
+        groups=groups,
+        group_labels=group_labels,
+        row_counts=row_counts,
+        group_label_map=group_label_map,
+        test_size=float(test_size),
+        val_size=float(val_size),
+        random_state=int(random_state),
+        group_split_strategy=group_split_strategy,
+        window_size=int(window_size),
+        stride_train=int(stride_train),
+        stride_val=int(stride_val),
+        stride_eval=int(stride_eval),
+        split_retries=int(split_retries),
+        min_eval_class_windows=5,
+        min_eval_class_groups=1,
+        min_train_class_windows=1,
+        min_train_class_groups=1,
+        min_val_class_groups=1,
+        min_test_class_groups=1,
+        prefer_balanced_train_groups=False,
+    )
+    split_group_sets = [set(train_groups.tolist()), set(val_groups.tolist()), set(test_groups.tolist())]
+    frame[feature_columns] = frame[feature_columns].fillna(0)
+    train_frame = frame[frame["__group_key__"].isin(list(split_group_sets[0]))].copy()
+    _, means, stds = normalize_columns(train_frame, feature_columns)
+    for col in feature_columns:
+        std = stds.get(col, 1.0) or 1.0
+        frame[col] = (frame[col] - means.get(col, 0.0)) / std
+
+    features: list[np.ndarray[Any, Any]] = []
+    labels: list[int] = []
+    split: list[int] = []
+    strides = [int(stride_train), int(stride_val), int(stride_eval)]
+    for split_value, group_set in enumerate(split_group_sets):
+        stride = strides[split_value]
+        for group in sorted(group_set, key=str):
+            group_frame = frame.loc[frame["__group_key__"] == group].sort_index()
+            label = int(group_frame[LABEL_COL].iloc[0])
+            values = group_frame[feature_columns].to_numpy(dtype=np.float32)
+            row_count = int(values.shape[0])
+            if row_count < int(window_size):
+                starts = [0]
+            else:
+                starts = list(range(0, row_count - int(window_size) + 1, max(1, stride)))
+            for start in starts:
+                window = values if row_count < int(window_size) else values[start : start + int(window_size)]
+                features.append(window.mean(axis=0).astype(np.float32))
+                labels.append(label)
+                split.append(split_value)
+
+    meta = {
+        "feature_names": list(feature_columns),
+        "split_quality": split_quality,
+        "normalization": normalization_label,
+    }
+    return (
+        np.asarray(features, dtype=np.float32),
+        np.asarray(labels, dtype=np.int64),
+        np.asarray(split, dtype=np.int64),
+        meta,
+    )
+
+
+def build_xop_window_features(**kwargs: Any) -> tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.int64]], np.ndarray[Any, np.dtype[np.int64]], dict[str, Any]]:
+    return build_window_mean_features(
+        feature_columns=list(STACK_COLS),
+        normalization_label="z-score stack operational variables using 6:4 training groups",
+        **kwargs,
+    )
+
+
+def build_xcond_window_features(**kwargs: Any) -> tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.int64]], np.ndarray[Any, np.dtype[np.int64]], dict[str, Any]]:
+    return build_window_mean_features(
+        feature_columns=list(COND_COLS),
+        normalization_label="z-score condition variables using 6:4 training groups",
+        **kwargs,
+    )
+
+
 def classwise_mean_abs_impact(impacts: np.ndarray[Any, Any]) -> np.ndarray[Any, np.dtype[np.float32]]:
     arr = np.asarray(impacts, dtype=np.float32)
     if arr.ndim != 3:
@@ -205,6 +338,10 @@ def top_feature_indices(classwise_matrix: np.ndarray[Any, Any], top_k: int) -> n
     matrix = np.asarray(classwise_matrix, dtype=np.float32)
     totals = matrix.sum(axis=1)
     return np.argsort(-totals)[: int(top_k)].astype(np.int64)
+
+
+def feature_order_by_total_impact(classwise_matrix: np.ndarray[Any, Any], top_k: int) -> np.ndarray[Any, np.dtype[np.int64]]:
+    return top_feature_indices(classwise_matrix, top_k=top_k)
 
 
 def train_eis_model(
@@ -305,14 +442,156 @@ def _setup_matplotlib() -> None:
 
 def _add_plain_panel_tag(ax: Any, tag: str) -> None:
     ax.text(
-        *PANEL_TAG_POSITION,
+        0.02,
+        1.04,
         tag,
         transform=ax.transAxes,
-        ha="center",
-        va="top",
-        fontsize=FONT_SIZE,
+        ha="left",
+        va="bottom",
+        fontsize=8.0,
         fontweight="normal",
     )
+
+
+def _rank_normalized(values: np.ndarray[Any, Any]) -> np.ndarray[Any, np.dtype[np.float32]]:
+    raw_values = np.asarray(values, dtype=np.float32)
+    finite_mask = np.isfinite(raw_values)
+    if finite_mask.sum() <= 1 or np.isclose(np.nanmin(raw_values), np.nanmax(raw_values)):
+        return np.full_like(raw_values, 0.5, dtype=np.float32)
+    normalized = np.full_like(raw_values, 0.5, dtype=np.float32)
+    valid_values = raw_values[finite_mask]
+    sorter = np.argsort(valid_values, kind="mergesort")
+    sorted_values = valid_values[sorter]
+    group_starts = np.r_[0, np.flatnonzero(np.diff(sorted_values)) + 1]
+    group_ends = np.r_[group_starts[1:], sorted_values.size]
+    sorted_ranks = np.empty(sorted_values.size, dtype=np.float32)
+    for start, end in zip(group_starts, group_ends):
+        sorted_ranks[start:end] = (start + end - 1) / 2.0
+    ranks = np.empty_like(sorted_ranks)
+    ranks[sorter] = sorted_ranks
+    normalized[finite_mask] = ranks / float(valid_values.size - 1)
+    return normalized.astype(np.float32)
+
+
+def _draw_stacked_bar_panel(
+    ax: Any,
+    classwise_matrix: np.ndarray[Any, Any],
+    feature_names: list[str],
+    *,
+    order: np.ndarray[Any, np.dtype[np.int64]],
+) -> None:
+    ordered_names = [feature_names[int(idx)] for idx in order]
+    ordered_matrix = np.asarray(classwise_matrix, dtype=np.float32)[order]
+    y = np.arange(len(order))
+    left = np.zeros(len(order), dtype=np.float32)
+    bar_height = 0.42 if len(order) <= 4 else 0.54
+    for class_id in CLASS_ORDER:
+        values = ordered_matrix[:, int(class_id)]
+        ax.barh(
+            y,
+            values,
+            left=left,
+            color=CLASS_COLORS[int(class_id)],
+            edgecolor="white",
+            linewidth=0.3,
+            label=CLASS_NAMES[int(class_id)],
+            height=bar_height,
+            zorder=3,
+        )
+        left += values
+    ax.set_yticks(y, ordered_names)
+    ax.invert_yaxis()
+    if len(order) <= 4:
+        ax.set_ylim(len(order) + 0.58, -0.50)
+    ax.set_xlabel("mean(|SHAP value|)")
+    style_axes(ax, grid_axis="x")
+    ax.tick_params(axis="both", labelsize=6.4)
+    ax.xaxis.label.set_size(7.5)
+    _add_plain_panel_tag(ax, "(a)")
+
+
+def _draw_beeswarm_panel(
+    ax: Any,
+    shap_values: np.ndarray[Any, Any],
+    feature_values: np.ndarray[Any, Any],
+    feature_names: list[str],
+    *,
+    order: np.ndarray[Any, np.dtype[np.int64]],
+    rng_seed: int,
+) -> Any:
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+
+    rng = np.random.default_rng(int(rng_seed))
+    values = np.asarray(shap_values, dtype=np.float32)
+    features = np.asarray(feature_values, dtype=np.float32)
+    ordered_names = [feature_names[int(idx)] for idx in order]
+    cmap = LinearSegmentedColormap.from_list("feature_value", ["#2F5DA8", "#F0F0F0", "#D73027"])
+    for row_pos, feature_idx in enumerate(order[::-1]):
+        x_values = values[:, int(feature_idx)]
+        normalized = _rank_normalized(features[:, int(feature_idx)])
+        jitter = rng.normal(0.0, 0.075, size=x_values.shape[0])
+        ax.scatter(
+            x_values,
+            np.full(x_values.shape[0], row_pos, dtype=np.float32) + jitter,
+            c=normalized,
+            cmap=cmap,
+            vmin=0.0,
+            vmax=1.0,
+            s=6,
+            alpha=0.95,
+            linewidths=0,
+            zorder=3,
+        )
+    ax.axvline(0.0, color="#7F7F7F", linewidth=0.8, zorder=2)
+    ax.set_yticks(range(len(order)))
+    ax.set_yticklabels([])
+    ax.set_xlabel("SHAP value")
+    style_axes(ax, grid_axis="x")
+    ax.tick_params(axis="both", labelsize=6.4)
+    ax.xaxis.label.set_size(7.5)
+    _add_plain_panel_tag(ax, "(b)")
+    return plt.cm.ScalarMappable(cmap=cmap)
+
+
+def plot_combined_shap_figure(
+    classwise_matrix: np.ndarray[Any, Any],
+    true_class_impacts: np.ndarray[Any, Any],
+    feature_values: np.ndarray[Any, Any],
+    feature_names: list[str],
+    output_base: Path,
+    *,
+    top_k: int,
+    rng_seed: int = 44,
+) -> list[str]:
+    import matplotlib.pyplot as plt
+
+    _setup_matplotlib()
+    order = feature_order_by_total_impact(classwise_matrix, top_k=top_k)
+    selected_names = [feature_names[int(idx)] for idx in order]
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(FULL_FIG_WIDTH_CM * CM, 7.9 * CM),
+        gridspec_kw={"width_ratios": [1.06, 1.0], "wspace": 0.30},
+    )
+    _draw_stacked_bar_panel(axes[0], classwise_matrix, feature_names, order=order)
+    mappable = _draw_beeswarm_panel(axes[1], true_class_impacts, feature_values, feature_names, order=order, rng_seed=rng_seed)
+    legend_kwargs = dict(LEGEND_KWARGS)
+    legend_kwargs.update(fontsize=6.4, borderpad=0.25, labelspacing=0.18, handletextpad=0.25)
+    legend = axes[0].legend(loc="lower right", bbox_to_anchor=(0.98, 0.02), **legend_kwargs)
+    style_legend_frame(legend)
+    cbar = fig.colorbar(mappable, ax=axes[1], fraction=0.045, pad=0.03)
+    cbar.set_ticks([0.0, 1.0])
+    cbar.set_ticklabels(["Low", "High"])
+    cbar.set_label("Feature value")
+    cbar.ax.tick_params(labelsize=6.4)
+    cbar.ax.yaxis.label.set_size(7.5)
+    fig.subplots_adjust(left=0.15, right=0.94, bottom=0.16, top=0.88)
+    output_base.parent.mkdir(parents=True, exist_ok=True)
+    save_paper_figure(fig, str(output_base), formats=("png", "pdf", "svg"))
+    plt.close(fig)
+    return selected_names
 
 
 def plot_bar(
@@ -478,31 +757,31 @@ def write_meta(
     path: Path,
     *,
     excel_path: Path,
+    analysis_name: str,
+    model_name: str,
     metrics: dict[str, float],
-    bar_path: Path,
-    summary_path: Path,
+    figure_path: Path,
     csv_path: Path,
     raw_feature_names: list[str],
     display_feature_names: list[str],
     summary_feature_names: list[str],
 ) -> None:
     meta = {
-        "analysis": "TreeSHAP EIS feature importance",
+        "analysis": analysis_name,
         "source_excel": str(excel_path),
         "split": "6:4, seed=44, group holdout-first",
-        "model": "RandomForestClassifier trained on 9 normalized EIS statistic features",
+        "model": model_name,
         "explainer": "shap.TreeExplainer",
         "metrics": {key: round(float(value), 4) for key, value in metrics.items()},
         "raw_feature_names": raw_feature_names,
         "display_feature_names": display_feature_names,
         "feature_shap_summary": {
-            "rule": "Top-k original EIS statistic features by mean absolute true-class SHAP value.",
+            "rule": "Top-k features by total classwise mean absolute SHAP value.",
             "top_k": len(summary_feature_names),
             "selected_features": summary_feature_names,
             "color": "Per-feature rank-normalized raw feature value on the test set.",
         },
-        "bar_figure": str(bar_path),
-        "feature_shap_summary_figure": str(summary_path),
+        "combined_figure": str(figure_path),
         "csv": str(csv_path),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -530,79 +809,150 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split-retries", type=int, default=50)
     parser.add_argument("--top-k", type=int, default=9)
     parser.add_argument("--interaction-top-k", type=int, default=3)
+    parser.add_argument("--modalities", default="all", choices=["all", "both", "eis", "x_op", "x_cond", "condition"], help="Which SHAP figures to generate.")
     return parser
+
+
+def _common_build_kwargs(args: argparse.Namespace, excel_path: Path) -> dict[str, Any]:
+    return {
+        "excel_path": excel_path,
+        "sheet_name": str(args.sheet_name),
+        "window_size": int(args.window_size),
+        "stride_train": int(args.stride_train),
+        "stride_val": int(args.stride_val),
+        "stride_eval": int(args.stride_eval),
+        "split_mode": str(args.split_mode),
+        "segment_gap_seconds": float(args.segment_gap_seconds),
+        "segment_block_seconds": float(args.segment_block_seconds),
+        "segment_label_boundary": bool(args.segment_label_boundary),
+        "random_state": int(args.random_state),
+        "test_size": float(args.test_size),
+        "val_size": float(args.val_size),
+        "group_split_strategy": str(args.group_split_strategy),
+        "split_retries": int(args.split_retries),
+    }
+
+
+def run_shap_analysis(
+    *,
+    modality: str,
+    features: np.ndarray[Any, Any],
+    labels: np.ndarray[Any, Any],
+    split: np.ndarray[Any, Any],
+    raw_feature_names: list[str],
+    output_dir: Path,
+    prefix: str,
+    excel_path: Path,
+    top_k: int,
+    random_state: int,
+    analysis_name: str,
+    model_name: str,
+) -> dict[str, Any]:
+    model, metrics = train_eis_model(features, labels, split, seed=int(random_state))
+    test_mask = split == 2
+    impacts = tree_shap_values(model, features[test_mask])
+    classwise_matrix = classwise_mean_abs_impact(impacts)
+    feature_names = english_feature_names(raw_feature_names)
+    true_class_impacts = true_class_shap_values(impacts, labels[test_mask], model.classes_)
+    output_base = output_dir / f"{prefix}_{modality}_combined"
+    csv_path = output_dir / f"{prefix}_{modality}_bar_values.csv"
+    meta_path = output_dir / f"{prefix}_{modality}.meta.json"
+    selected_names = plot_combined_shap_figure(
+        classwise_matrix,
+        true_class_impacts,
+        features[test_mask],
+        feature_names,
+        output_base,
+        top_k=min(int(top_k), len(feature_names)),
+        rng_seed=int(random_state),
+    )
+    write_bar_csv(classwise_matrix, feature_names, csv_path)
+    write_meta(
+        meta_path,
+        excel_path=excel_path,
+        analysis_name=analysis_name,
+        model_name=model_name,
+        metrics=metrics,
+        figure_path=output_base.with_suffix(".png"),
+        csv_path=csv_path,
+        raw_feature_names=raw_feature_names,
+        display_feature_names=feature_names,
+        summary_feature_names=selected_names,
+    )
+    return {
+        "modality": modality,
+        "figure": str(output_base.with_suffix(".png")),
+        "svg": str(output_base.with_suffix(".svg")),
+        "pdf": str(output_base.with_suffix(".pdf")),
+        "csv": str(csv_path),
+        "meta": str(meta_path),
+        "metrics": metrics,
+        "top_features": selected_names,
+    }
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     excel_path = _as_project_path(args.excel)
     output_dir = _as_project_path(args.output_dir)
-    features, labels, split, meta = build_eis_window_features(
-        excel_path=excel_path,
-        sheet_name=str(args.sheet_name),
-        window_size=int(args.window_size),
-        stride_train=int(args.stride_train),
-        stride_val=int(args.stride_val),
-        stride_eval=int(args.stride_eval),
-        split_mode=str(args.split_mode),
-        segment_gap_seconds=float(args.segment_gap_seconds),
-        segment_block_seconds=float(args.segment_block_seconds),
-        segment_label_boundary=bool(args.segment_label_boundary),
-        random_state=int(args.random_state),
-        test_size=float(args.test_size),
-        val_size=float(args.val_size),
-        group_split_strategy=str(args.group_split_strategy),
-        split_retries=int(args.split_retries),
-    )
-    model, metrics = train_eis_model(features, labels, split, seed=int(args.random_state))
-    train_mask = split == 0
-    test_mask = split == 2
-    impacts = tree_shap_values(model, features[test_mask])
-    classwise_matrix = classwise_mean_abs_impact(impacts)
-    raw_feature_names = list(meta["feature_names"])
-    feature_names = english_feature_names(raw_feature_names)
-    true_class_impacts = true_class_shap_values(impacts, labels[test_mask], model.classes_)
-    summary_order = np.argsort(-np.mean(np.abs(true_class_impacts), axis=0))[: int(args.top_k)]
-    selected_names = [feature_names[int(idx)] for idx in summary_order]
-
-    bar_path = output_dir / f"{args.prefix}_bar.png"
-    summary_path = output_dir / f"{args.prefix}_interaction_summary.png"
-    csv_path = output_dir / f"{args.prefix}_bar_values.csv"
-    meta_path = output_dir / f"{args.prefix}.meta.json"
-    plot_bar(classwise_matrix, feature_names, bar_path, top_k=int(args.top_k))
-    plot_feature_shap_summary(
-        true_class_impacts,
-        features[test_mask],
-        feature_names,
-        summary_path,
-        top_k=int(args.top_k),
-    )
-    write_bar_csv(classwise_matrix, feature_names, csv_path)
-    write_meta(
-        meta_path,
-        excel_path=excel_path,
-        metrics=metrics,
-        bar_path=bar_path,
-        summary_path=summary_path,
-        csv_path=csv_path,
-        raw_feature_names=raw_feature_names,
-        display_feature_names=feature_names,
-        summary_feature_names=selected_names,
-    )
-    print(
-        json.dumps(
-            {
-                "bar": str(bar_path),
-                "feature_shap_summary": str(summary_path),
-                "csv": str(csv_path),
-                "meta": str(meta_path),
-                "metrics": metrics,
-                "top_feature_shap_features": selected_names,
-            },
-            ensure_ascii=False,
-            indent=2,
+    outputs: list[dict[str, Any]] = []
+    common_kwargs = _common_build_kwargs(args, excel_path)
+    modalities = "x_cond" if str(args.modalities) == "condition" else str(args.modalities)
+    if modalities in {"all", "both", "eis"}:
+        features, labels, split, meta = build_eis_window_features(**common_kwargs)
+        outputs.append(
+            run_shap_analysis(
+                modality="eis",
+                features=features,
+                labels=labels,
+                split=split,
+                raw_feature_names=list(meta["feature_names"]),
+                output_dir=output_dir,
+                prefix=str(args.prefix),
+                excel_path=excel_path,
+                top_k=int(args.top_k),
+                random_state=int(args.random_state),
+                analysis_name="TreeSHAP EIS feature importance",
+                model_name="RandomForestClassifier trained on 9 normalized EIS statistic features",
+            )
         )
-    )
+    if modalities in {"all", "both", "x_op"}:
+        features, labels, split, meta = build_xop_window_features(**common_kwargs)
+        outputs.append(
+            run_shap_analysis(
+                modality="x_op",
+                features=features,
+                labels=labels,
+                split=split,
+                raw_feature_names=list(meta["feature_names"]),
+                output_dir=output_dir,
+                prefix=str(args.prefix),
+                excel_path=excel_path,
+                top_k=min(int(args.top_k), len(meta["feature_names"])),
+                random_state=int(args.random_state),
+                analysis_name="TreeSHAP x_op operational feature importance",
+                model_name="RandomForestClassifier trained on normalized x_op stack operational window-mean features",
+            )
+        )
+    if modalities in {"all", "x_cond"}:
+        features, labels, split, meta = build_xcond_window_features(**common_kwargs)
+        outputs.append(
+            run_shap_analysis(
+                modality="x_cond",
+                features=features,
+                labels=labels,
+                split=split,
+                raw_feature_names=list(meta["feature_names"]),
+                output_dir=output_dir,
+                prefix=str(args.prefix),
+                excel_path=excel_path,
+                top_k=min(int(args.top_k), len(meta["feature_names"])),
+                random_state=int(args.random_state),
+                analysis_name="TreeSHAP condition feature importance",
+                model_name="RandomForestClassifier trained on normalized x_cond condition window-mean features",
+            )
+        )
+    print(json.dumps({"outputs": outputs}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

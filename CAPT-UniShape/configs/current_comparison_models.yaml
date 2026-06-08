@@ -125,6 +125,30 @@ baselines:
     weight_decay: 0.002
     class_weighting: sqrt_balanced
     batch_size: 32
+  transformer:
+    setting_name: modest_torch_transformer
+    d_model: 24
+    num_layers: 1
+    epochs: 20
+    patience: 4
+    min_epochs_before_stop: 8
+    dropout: 0.35
+    lr: 0.0006
+    weight_decay: 0.0005
+    class_weighting: sqrt_balanced
+    batch_size: 32
+  itransformer:
+    setting_name: modest_torch_itransformer
+    d_model: 16
+    num_layers: 1
+    epochs: 18
+    patience: 4
+    min_epochs_before_stop: 8
+    dropout: 0.4
+    lr: 0.0006
+    weight_decay: 0.0005
+    class_weighting: none
+    batch_size: 32
 
 excluded_models:
   - lstm

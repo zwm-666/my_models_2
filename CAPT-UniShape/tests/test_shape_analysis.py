@@ -179,6 +179,36 @@ class ShapeAnalysisTests(unittest.TestCase):
         self.assertEqual(names, ["Total impedance", "EIS resistance real", "EIS resistance imaginary"])
         self.assertTrue(all(all(ord(ch) < 128 for ch in name) for name in names))
 
+    def test_operational_display_names_are_english(self) -> None:
+        from experiments.plot_eis_shap_style import english_feature_names
+
+        names = english_feature_names(["电堆总电压", "电堆总电流", "电堆功率"])
+
+        self.assertEqual(names, ["Stack voltage", "Stack current", "Stack power"])
+        self.assertTrue(all(all(ord(ch) < 128 for ch in name) for name in names))
+
+    def test_shap_condition_display_names_are_english(self) -> None:
+        from experiments.plot_eis_shap_style import english_feature_names
+
+        names = english_feature_names(["进堆空压", "氢压差", "FC空压机出口温度"])
+
+        self.assertEqual(names, ["Air inlet pressure", "Hydrogen pressure drop", "Compressor outlet temperature"])
+        self.assertTrue(all(all(ord(ch) < 128 for ch in name) for name in names))
+
+    def test_feature_order_by_total_mean_abs_shap(self) -> None:
+        from experiments.plot_eis_shap_style import feature_order_by_total_impact
+
+        matrix = np.array(
+            [
+                [0.1, 0.0, 0.0],
+                [0.1, 0.2, 0.4],
+                [0.3, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+
+        self.assertEqual(feature_order_by_total_impact(matrix, top_k=2).tolist(), [1, 2])
+
     def test_condition_candidate_columns_exclude_model_input_sources(self) -> None:
         import pandas as pd
 
