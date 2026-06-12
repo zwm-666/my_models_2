@@ -19,9 +19,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 _converter = importlib.import_module("experiments.build_official_npz_from_self_excel")
+_snr = importlib.import_module("experiments.refresh_snr_noise_results")
 _train = importlib.import_module("train")
 _models = importlib.import_module("models")
 build_npz = _converter.build_npz
+write_test_subset_with_snr_noise = _snr.write_test_subset_with_snr_noise
+noise_seed_for_snr = _snr.noise_seed_for_snr
 FuelCellNPZDataset = _train.FuelCellNPZDataset
 count_parameters = _train.count_parameters
 evaluate_loader = _train.evaluate_loader
@@ -41,6 +44,8 @@ RATIO_TO_TEST_SIZE = {
 MODELS = {
     "proposed": "configs/proposed.yaml",
 }
+
+DEFAULT_SNR_DBS = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0]
 
 
 def _subset_and_noise_test_npz(
@@ -130,15 +135,45 @@ def _metric_row(
     }
 
 
+def _snr_metric_row(
+    ratio: str,
+    model_key: str,
+    snr_db: str,
+    actual_snr_db_mean: Any,
+    noise_targets: list[str],
+    data_path: Path,
+    metrics_path: Path,
+) -> dict[str, Any]:
+    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    return {
+        "ratio": ratio.replace("_", ":"),
+        "variant": model_key,
+        "model": model_key,
+        "scenario": "clean" if str(snr_db).lower() == "clean" else f"snr_{snr_db}dB",
+        "snr_db": snr_db,
+        "actual_snr_db_mean": actual_snr_db_mean,
+        "noise_targets": "+".join(noise_targets),
+        "test_accuracy": float(payload.get("accuracy", 0.0)),
+        "test_macro_f1": float(payload.get("macro_f1", 0.0)),
+        "test_weighted_f1": float(payload.get("weighted_f1", 0.0)),
+        "test_inference_ms": float(payload.get("inference_time_per_sample_ms", 0.0)),
+        "parameter_count": int(payload.get("parameter_count", 0)),
+        "data_path": str(data_path),
+        "metrics_path": str(metrics_path),
+    }
+
+
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="运行单一训练/测试比例下的噪声鲁棒性实验")
     parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
     parser.add_argument("--ratio", default="5_5", choices=list(RATIO_TO_TEST_SIZE.keys()))
     parser.add_argument("--models", nargs="+", default=["proposed"], choices=list(MODELS.keys()))
-    parser.add_argument("--noise-stds", nargs="+", type=float, default=[0.0, 0.01, 0.03, 0.05, 0.10])
+    parser.add_argument("--snr-dbs", nargs="+", type=float, default=DEFAULT_SNR_DBS)
+    parser.add_argument("--snr-scope", choices=["global", "per_sample_modality"], default="per_sample_modality")
+    parser.add_argument("--noise-stds", nargs="+", type=float, default=[0.0, 0.01, 0.03, 0.05, 0.10], help=argparse.SUPPRESS)
     parser.add_argument("--noise-targets", nargs="+", default=["x_op", "x_eis", "x_cond"], choices=["x_op", "x_eis", "x_cond"])
-    parser.add_argument("--output-root", default="outputs/new_results/noise_5_5_official")
-    parser.add_argument("--data-root", default="outputs/new_results/processed/noise_5_5_official")
+    parser.add_argument("--output-root", default="outputs/new_results/noise_5_5_snr_official")
+    parser.add_argument("--data-root", default="outputs/new_results/processed/noise_5_5_snr_official")
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--stride-train", type=int, default=16)
     parser.add_argument("--stride-eval", type=int, default=32)
@@ -222,21 +257,44 @@ def main() -> None:
         )
         checkpoint_path = train_dir / "best.ckpt"
         trained_config = _load_checkpoint_config(checkpoint_path)
+        rows.append(
+            _snr_metric_row(
+                args.ratio,
+                model_key,
+                "clean",
+                "",
+                noise_targets,
+                clean_npz,
+                train_dir / "metrics.json",
+            )
+        )
 
-        for noise_std in args.noise_stds:
-            noise_name = f"noise_{noise_std:.3f}".replace(".", "p")
+        for snr_db in args.snr_dbs:
+            label = f"{float(snr_db):g}"
+            noise_name = f"snr_{label}dB"
             noisy_npz = data_root / args.ratio / model_key / f"{noise_name}.npz"
-            print(f"\n=== 噪声测试 {model_key} | std={noise_std:.3f} | targets={'+'.join(noise_targets)} ===", flush=True)
-            _subset_and_noise_test_npz(
-                base_npz=clean_npz,
+            print(f"\n=== SNR 噪声测试 {model_key} | snr={label}dB | targets={'+'.join(noise_targets)} ===", flush=True)
+            noise_summary = write_test_subset_with_snr_noise(
+                clean_npz=clean_npz,
                 output_npz=noisy_npz,
-                noise_std=float(noise_std),
+                snr_db=float(snr_db),
                 noise_targets=noise_targets,
-                seed=int(args.seed) + int(round(float(noise_std) * 10000)),
+                seed=noise_seed_for_snr(int(args.seed), float(snr_db)),
+                snr_scope=str(args.snr_scope),
             )
             eval_dir = output_root / args.ratio / model_key / noise_name
             _evaluate_checkpoint(trained_config, noisy_npz, checkpoint_path, eval_dir)
-            rows.append(_metric_row(args.ratio, model_key, float(noise_std), noise_targets, noisy_npz, eval_dir / "metrics.json"))
+            rows.append(
+                _snr_metric_row(
+                    args.ratio,
+                    model_key,
+                    label,
+                    float(noise_summary["actual_snr_db_mean"]),
+                    noise_targets,
+                    noisy_npz,
+                    eval_dir / "metrics.json",
+                )
+            )
 
     summary_path = output_root / "summary.csv"
     with summary_path.open("w", newline="", encoding="utf-8") as handle:

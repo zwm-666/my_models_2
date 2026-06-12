@@ -87,7 +87,7 @@ class BaselineComparisonFigureTests(unittest.TestCase):
             self.assertEqual(models, ["svm", "proposed"])
 
     def test_noise_summary_plot_accepts_snr_ablation_rows(self) -> None:
-        from experiments.utils.plot_results import plot_noise_summary
+        from experiments.utils.plot_results import _read_summary_csv, plot_noise_summary
 
         with TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -97,6 +97,7 @@ class BaselineComparisonFigureTests(unittest.TestCase):
                     [
                         "variant,scenario,snr_db,test_macro_f1",
                         "full_rbf,clean,clean,1.0",
+                        "full_rbf,mid_noise,10,0.75",
                         "full_rbf,low_noise,30,0.91",
                         "full_rbf,high_noise,5,0.60",
                         "no_rbf,clean,clean,1.0",
@@ -107,8 +108,11 @@ class BaselineComparisonFigureTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            output_path = plot_noise_summary(summary_path, tmp_path)
+            output_path = plot_noise_summary(summary_path, tmp_path, results_workbook=None)
             self.assertEqual(output_path.name, "official_noise_summary.png")
+            source_rows = _read_summary_csv(tmp_path / "official_noise_summary_source.csv")
+            snr_order = list(dict.fromkeys(row["snr_db"] for row in source_rows))
+            self.assertEqual(snr_order, ["5", "10", "30", "clean"])
             self.assertTrue(output_path.is_file())
 
     def test_noise_summary_plot_uses_workbook_comparison_models_only(self) -> None:
@@ -122,11 +126,11 @@ class BaselineComparisonFigureTests(unittest.TestCase):
             summary_path.write_text(
                 "\n".join(
                     [
-                        "variant,scenario,snr_db,test_macro_f1",
-                        "full_rbf,clean,clean,1.0",
-                        "full_rbf,low_noise,30,0.91",
-                        "no_rbf,clean,clean,0.80",
-                        "no_rbf,low_noise,30,0.70",
+                        "variant,scenario,snr_db,test_macro_f1,test_accuracy,test_weighted_f1,macro_f1,accuracy,weighted_f1",
+                        "full_rbf,clean,clean,1.0,1.0,1.0,,,",
+                        "full_rbf,low_noise,30,0.91,0.92,0.93,,,",
+                        "xgboost,clean,clean,,,,0.82,0.83,0.84",
+                        "xgboost,low_noise,30,,,,0.72,0.73,0.74",
                     ]
                 ),
                 encoding="utf-8",
@@ -146,11 +150,59 @@ class BaselineComparisonFigureTests(unittest.TestCase):
 
             self.assertEqual({row["variant"] for row in rows}, {"proposed", "svm"})
             merged_rows = _read_summary_csv(tmp_path / "official_noise_summary_source.csv")
-            self.assertEqual({row["variant"] for row in merged_rows}, {"proposed", "svm"})
+            self.assertEqual({row["variant"] for row in merged_rows}, {"proposed", "svm", "xgboost"})
             self.assertAlmostEqual(
                 float([row for row in merged_rows if row["variant"] == "proposed" and row["snr_db"] == "30"][-1]["test_macro_f1"]),
                 0.91,
             )
+            self.assertAlmostEqual(
+                float([row for row in merged_rows if row["variant"] == "xgboost" and row["snr_db"] == "30"][-1]["macro_f1"]),
+                0.72,
+            )
+            self.assertTrue(output_path.is_file())
+
+    def test_metric_reader_falls_back_to_compact_summary_columns(self) -> None:
+        from experiments.utils.plot_results import _safe_metric_float
+
+        row = {
+            "test_macro_f1": "",
+            "macro_f1": "0.7448",
+            "test_accuracy": "",
+            "accuracy": "0.7917",
+            "test_weighted_f1": "",
+            "weighted_f1": "0.7951",
+        }
+
+        self.assertAlmostEqual(_safe_metric_float(row, "test_macro_f1"), 0.7448)
+        self.assertAlmostEqual(_safe_metric_float(row, "test_accuracy"), 0.7917)
+        self.assertAlmostEqual(_safe_metric_float(row, "test_weighted_f1"), 0.7951)
+
+    def test_noise_summary_orders_full_snr_axis_and_reads_compact_baseline_metrics(self) -> None:
+        from experiments.utils.plot_results import _read_summary_csv, _safe_metric_float, plot_noise_summary
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            summary_path = tmp_path / "snr_summary.csv"
+            rows = [
+                "variant,snr_db,test_accuracy,test_macro_f1,test_weighted_f1,accuracy,macro_f1,weighted_f1",
+            ]
+            for snr in ["40", "35", "30", "25", "20", "15", "10", "5", "clean"]:
+                rows.append(f"full_rbf,{snr},0.98,0.97,0.98,,,")
+                rows.append(f"xgboost,{snr},,,,0.79,0.74,0.78")
+            summary_path.write_text("\n".join(rows), encoding="utf-8")
+
+            output_path = plot_noise_summary(summary_path, tmp_path, results_workbook=None)
+
+            source_rows = _read_summary_csv(tmp_path / "official_noise_summary_source.csv")
+            snr_order = list(dict.fromkeys(row["snr_db"] for row in source_rows))
+            self.assertEqual(snr_order, ["5", "10", "15", "20", "25", "30", "35", "40", "clean"])
+            baseline_5db = next(row for row in source_rows if row["variant"] == "xgboost" and row["snr_db"] == "5")
+            self.assertEqual(baseline_5db["test_accuracy"], "")
+            self.assertEqual(baseline_5db["test_macro_f1"], "")
+            self.assertEqual(baseline_5db["test_weighted_f1"], "")
+            self.assertAlmostEqual(_safe_metric_float(baseline_5db, "test_accuracy"), 0.79)
+            self.assertAlmostEqual(_safe_metric_float(baseline_5db, "test_macro_f1"), 0.74)
+            self.assertAlmostEqual(_safe_metric_float(baseline_5db, "test_weighted_f1"), 0.78)
             self.assertTrue(output_path.is_file())
 
 
@@ -438,6 +490,25 @@ class OfficialNoiseExperimentCLITests(unittest.TestCase):
         self.assertEqual(args.snr_scope, "per_sample_modality")
         self.assertIn("snr", args.output_root)
         self.assertIn("snr", args.data_root)
+
+    def test_snr_metric_row_uses_plot_results_schema(self) -> None:
+        from experiments.run_official_noise_experiments import _snr_metric_row
+
+        with TemporaryDirectory() as tmpdir:
+            metrics_path = Path(tmpdir) / "metrics.json"
+            metrics_path.write_text(
+                '{"accuracy": 0.9, "macro_f1": 0.8, "weighted_f1": 0.85, "inference_time_per_sample_ms": 12.3, "parameter_count": 7}',
+                encoding="utf-8",
+            )
+
+            row = _snr_metric_row("5_5", "proposed", "40", 40.0, ["x_op"], Path("snr_40dB.npz"), metrics_path)
+
+        self.assertEqual(row["ratio"], "5:5")
+        self.assertEqual(row["variant"], "proposed")
+        self.assertEqual(row["model"], "proposed")
+        self.assertEqual(row["scenario"], "snr_40dB")
+        self.assertEqual(row["snr_db"], "40")
+        self.assertNotIn("noise_std", row)
 
 
 class TrainingUtilityTests(unittest.TestCase):

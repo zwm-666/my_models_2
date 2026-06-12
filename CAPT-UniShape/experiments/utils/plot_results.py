@@ -130,6 +130,37 @@ def _safe_float(row: dict[str, str], key: str) -> float:
     return _coerce_float(value)
 
 
+def _safe_metric_float(row: dict[str, str], key: str) -> float:
+    fallback_keys = {
+        "test_accuracy": "accuracy",
+        "test_macro_f1": "macro_f1",
+        "test_weighted_f1": "weighted_f1",
+        "test_inference_ms": "inference_ms",
+    }
+    value = row.get(key, "")
+    if value not in (None, ""):
+        return _coerce_float(value)
+    fallback_key = fallback_keys.get(key)
+    if fallback_key is not None:
+        return _coerce_float(row.get(fallback_key, ""))
+    return _coerce_float(value)
+
+
+def _fill_metric_aliases(row: dict[str, str]) -> dict[str, str]:
+    normalized = dict(row)
+    for test_key, compact_key in (
+        ("test_accuracy", "accuracy"),
+        ("test_macro_f1", "macro_f1"),
+        ("test_weighted_f1", "weighted_f1"),
+        ("test_inference_ms", "inference_ms"),
+    ):
+        test_value = normalized.get(test_key, "")
+        compact_value = normalized.get(compact_key, "")
+        if compact_value in (None, "") and test_value not in (None, ""):
+            normalized[compact_key] = test_value
+    return normalized
+
+
 def _coerce_float(value: Any) -> float:
     if value is None or value == "":
         return 0.0
@@ -233,10 +264,9 @@ def _normalize_snr_proposed_rows(rows: list[dict[str, str]]) -> list[dict[str, s
     output: list[dict[str, str]] = []
     for row in rows:
         variant = str(row.get("variant", "")).strip()
-        if variant not in {"full_rbf", "proposed"}:
-            continue
-        normalized = dict(row)
-        normalized["variant"] = "proposed"
+        normalized = _fill_metric_aliases(row)
+        if variant == "full_rbf":
+            normalized["variant"] = "proposed"
         output.append(normalized)
     return output
 
@@ -252,7 +282,17 @@ def _merge_metric_rows(
         key = tuple(str(row.get(field, "")) for field in key_fields)
         if key not in merged:
             order.append(key)
-        merged[key] = row
+            merged[key] = dict(row)
+            continue
+        merged_row = dict(merged[key])
+        for field, value in row.items():
+            if value in (None, "") and field in merged_row:
+                continue
+            if field not in merged_row or merged_row.get(field, "") in (None, ""):
+                merged_row[field] = value
+            else:
+                merged_row[field] = value
+        merged[key] = merged_row
     return [merged[key] for key in order]
 
 
@@ -495,10 +535,12 @@ def plot_noise_summary(summary_path: Path, output_dir: Path, results_workbook: P
         x_label = "SNR (dB)"
         x_values = sorted(
             {row[x_key] for row in rows},
-            key=lambda value: 99.0 if str(value).lower() == "clean" else -float(value),
+            key=lambda value: float("inf") if str(value).lower() == "clean" else float(value),
         )
         x_positions = np.arange(len(x_values))
         x_ticklabels = [str(value) for value in x_values]
+        snr_order = {str(value): index for index, value in enumerate(x_values)}
+        rows = sorted(rows, key=lambda row: (snr_order.get(str(row.get(x_key, "")), 999), str(row.get(model_key, ""))))
     else:
         model_key = "model"
         x_key = "noise_std"
@@ -558,10 +600,10 @@ def plot_noise_summary(summary_path: Path, output_dir: Path, results_workbook: P
         gridspec_kw={"hspace": STACKED_SUBPLOT_ONE_LINE_HSPACE},
     )
     for ax, (panel_tag, metric_col, ylabel, y_floor, nominal_y_max) in zip(axes, METRIC_SPECS):
-        metric_values = [_safe_float(row, metric_col) * 100.0 for row in rows]
+        metric_values = [_safe_metric_float(row, metric_col) * 100.0 for row in rows]
         y_min = min(y_floor, max(0.0, float(np.floor((min(metric_values) - 2.0) / 10.0) * 10.0))) if metric_values else y_floor
         proposed_rows = [row for row in rows if row.get(model_key) == "proposed"]
-        proposed_values = [_safe_float(row, metric_col) * 100.0 for row in proposed_rows]
+        proposed_values = [_safe_metric_float(row, metric_col) * 100.0 for row in proposed_rows]
         _, y_max = ylim_with_inside_text(max(proposed_values or [nominal_y_max]), y_min, upper=nominal_y_max)
         for model in models:
             values: list[float] = []
@@ -574,7 +616,7 @@ def plot_noise_summary(summary_path: Path, output_dir: Path, results_workbook: P
                     ]
                 else:
                     matched = [row for row in rows if row[model_key] == model and str(row[x_key]) == str(x_value)]
-                values.append(_safe_float(matched[-1], metric_col) * 100.0 if matched else np.nan)
+                values.append(_safe_metric_float(matched[-1], metric_col) * 100.0 if matched else np.nan)
             is_proposed = model == "proposed"
             ax.plot(
                 x_positions,
