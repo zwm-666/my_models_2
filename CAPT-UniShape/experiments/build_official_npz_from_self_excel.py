@@ -52,17 +52,17 @@ build_self_datasets = _self_dataset.build_self_datasets
 LABEL_ALIASES: list[str] = [LABEL_COL, "label", "Label", "标签"]
 STRING_LABEL_MAP: dict[str, int] = {
     "正常": 0,
-    "过湿": 1,
-    "水淹": 1,
-    "过干": 2,
-    "膜干": 2,
+    "过干": 1,
+    "膜干": 1,
+    "过湿": 2,
+    "水淹": 2,
 }
 
 
 def _prepare_label_column(frame: pd.DataFrame) -> tuple[pd.DataFrame, str, dict[str, int]]:
     """Return a frame with the canonical numeric LABEL_COL.
 
-    The project class order is 0=正常, 1=过湿/水淹, 2=过干/膜干.
+    The project class order is 0=正常, 1=过干/膜干, 2=过湿/水淹.
     """
     source_col = next((col for col in LABEL_ALIASES if col in frame.columns), None)
     if source_col is None:

@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DEFAULT_COARSE_MAP: Dict[int, int] = {
     0: 0,  # Normal
-    1: 1,  # Flooding
-    2: 1,  # Drying  -> membrane degradation group
+    1: 1,  # Drying
+    2: 1,  # Flooding -> membrane degradation group
     3: 2,  # CO poisoning
     4: 2,  # Catalyst degradation -> poisoning group
 }

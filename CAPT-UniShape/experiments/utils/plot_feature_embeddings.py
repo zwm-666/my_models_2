@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-CLASS_NAMES = ["正常", "过湿", "过干"]
+CLASS_NAMES = ["正常", "过干/膜干", "过湿/水淹"]
 SPLIT_TO_VALUE = {"train": 0, "val": 1, "test": 2}
 BASELINE_DISPLAY_NAMES = {
     "mlp": "MLP",

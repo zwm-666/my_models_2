@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-CLASS_NAMES = ["正常", "过湿", "过干"]
-CLASS_DISPLAY_NAMES = ["Normal", "Over-wet", "Over-dry"]
+CLASS_NAMES = ["正常", "过干/膜干", "过湿/水淹"]
+CLASS_DISPLAY_NAMES = ["Normal", "Drying", "Flooding"]
 SPLIT_TO_VALUE = {"train": 0, "val": 1, "test": 2}
 CHANNEL_NAMES = [
     "Interpolated impedance-statistic curve",
@@ -249,7 +249,7 @@ def write_meta(
         "split": split,
         "sample_count": int(indices.shape[0]),
         "class_counts": counts,
-        "label_mapping": {"正常": 0, "过湿/水淹": 1, "过干/膜干": 2},
+        "label_mapping": {"正常": 0, "过干/膜干": 1, "过湿/水淹": 2},
         "x_eis_channels": CHANNEL_NAMES,
         "note": "x_eis is constructed from nine impedance/EIS statistical features; it is not raw full-frequency EIS spectra.",
         "figure": str(output_figure),

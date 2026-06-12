@@ -39,8 +39,7 @@ RATIO_TO_TEST_SIZE = {
 }
 
 MODELS = {
-    "rbf": "configs/rbf_kanfusion.yaml",
-    "no_rbf": "configs/kanfusion_no_rbf.yaml",
+    "proposed": "configs/proposed.yaml",
 }
 
 
@@ -131,15 +130,15 @@ def _metric_row(
     }
 
 
-def main() -> None:
+def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="运行单一训练/测试比例下的噪声鲁棒性实验")
     parser.add_argument("--excel", default="data/raw/水淹和膜干故障测试数据_补充特征汇总.xlsx")
-    parser.add_argument("--ratio", default="8_2", choices=list(RATIO_TO_TEST_SIZE.keys()))
-    parser.add_argument("--models", nargs="+", default=list(MODELS.keys()), choices=list(MODELS.keys()))
+    parser.add_argument("--ratio", default="5_5", choices=list(RATIO_TO_TEST_SIZE.keys()))
+    parser.add_argument("--models", nargs="+", default=["proposed"], choices=list(MODELS.keys()))
     parser.add_argument("--noise-stds", nargs="+", type=float, default=[0.0, 0.01, 0.03, 0.05, 0.10])
     parser.add_argument("--noise-targets", nargs="+", default=["x_op", "x_eis", "x_cond"], choices=["x_op", "x_eis", "x_cond"])
-    parser.add_argument("--output-root", default="results/official_noise_experiments")
-    parser.add_argument("--data-root", default="data/processed/official_noise_experiments")
+    parser.add_argument("--output-root", default="outputs/new_results/noise_5_5_official")
+    parser.add_argument("--data-root", default="outputs/new_results/processed/noise_5_5_official")
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--stride-train", type=int, default=16)
     parser.add_argument("--stride-eval", type=int, default=32)
@@ -156,7 +155,7 @@ def main() -> None:
     parser.add_argument("--refit-trainval", action=argparse.BooleanOptionalAction, default=False, help="验证集只用于选epoch，最终模型用train+val重训；默认关闭以保持验证/测试独立")
     parser.add_argument("--min-epochs-before-stop", type=int, default=20)
     parser.add_argument("--val-metric-smoothing", type=int, default=3)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=44)
     parser.add_argument("--class-aware-train-stride", action="store_true", help="训练集按类别自动调节滑窗步长：少数类更密，多数类更稀")
     parser.add_argument("--min-train-stride", type=int, default=None, help="类别感知训练步长下限；默认 stride_train//2")
     parser.add_argument("--max-train-stride", type=int, default=None, help="类别感知训练步长上限；默认 stride_train*2")
@@ -164,7 +163,11 @@ def main() -> None:
     parser.add_argument("--split-retries", type=int, default=50, help="重试分组划分并选择少数类支持更好的 split")
     parser.add_argument("--min-eval-class-windows", type=int, default=5, help="验证/测试集中任一类别窗口数低于该值时标记为不稳定")
     parser.add_argument("--min-eval-class-groups", type=int, default=1, help="验证/测试集中任一类别 group 数低于该值时标记为不稳定")
-    args = parser.parse_args()
+    return parser.parse_args(args)
+
+
+def main() -> None:
+    args = parse_args()
 
     output_root = ROOT / args.output_root
     data_root = ROOT / args.data_root
@@ -245,4 +248,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

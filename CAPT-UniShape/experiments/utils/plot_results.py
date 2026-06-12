@@ -1,10 +1,11 @@
-"""Plot figures from official CAPT-UniShape train/evaluate outputs."""
+"""Plot the official baseline comparison summary and related experiment figures."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,109 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "Arial Unicode MS", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+ROOT = Path(__file__).resolve().parents[2]
+FIG_STYLE_DIR = ROOT / "outputs" / "paper_figures"
+if str(FIG_STYLE_DIR) not in sys.path:
+    sys.path.insert(0, str(FIG_STYLE_DIR))
+
+from plot_style import (  # noqa: E402
+    ANNOTATION_SIZE,
+    LEGEND_KWARGS,
+    MODEL_COLORS,
+    STACKED_SUBPLOT_ONE_LINE_HSPACE,
+    add_bottom_caption,
+    add_panel_tag,
+    apply_paper_style,
+    figsize_full,
+    inside_text_y,
+    save_paper_figure,
+    show_shared_x_axis,
+    style_axes,
+    style_legend_frame,
+    ylim_with_inside_text,
+)
 
 
-CLASS_NAMES = ["正常", "过湿", "过干"]
+CLASS_NAMES = ["正常", "过干/膜干", "过湿/水淹"]
+DEFAULT_RESULTS_WORKBOOK = Path("outputs/results_summary/实验结果总表.xlsx")
+PAPER_OUTPUT_FORMATS = ("png", "svg")
+
+METRIC_SPECS = [
+    ("(a)", "test_accuracy", "Accuracy (%)", 40.0, 100.0),
+    ("(b)", "test_macro_f1", "Macro-F1 (%)", 10.0, 100.0),
+    ("(c)", "test_weighted_f1", "Weighted-F1 (%)", 30.0, 100.0),
+]
+
+
+MODEL_ALIASES = {
+    "proposed": "proposed",
+    "capt-unishape": "proposed",
+    "capt_unishape": "proposed",
+    "xgboost": "xgboost",
+    "lightgbm": "lightgbm",
+    "logistic regression": "logreg",
+    "logreg": "logreg",
+    "lr": "logreg",
+    "svm": "svm",
+    "random forest": "random_forest",
+    "random_forest": "random_forest",
+    "rf": "random_forest",
+    "mlp": "mlp",
+    "1d-cnn": "cnn1d",
+    "cnn1d": "cnn1d",
+    "cnn": "cnn1d",
+    "tcn": "tcn",
+    "autoformer": "autoformer",
+    "transformer": "transformer",
+    "itransformer": "itransformer",
+}
+
+MODEL_ORDER = [
+    "proposed",
+    "xgboost",
+    "lightgbm",
+    "mlp",
+    "tcn",
+    "autoformer",
+    "transformer",
+    "itransformer",
+    "logreg",
+    "svm",
+    "random_forest",
+    "cnn1d",
+]
+
+MODEL_LABELS = {
+    "proposed": "CAPT-UniShape",
+    "xgboost": "XGBoost",
+    "lightgbm": "LightGBM",
+    "logreg": "LR",
+    "svm": "SVM",
+    "random_forest": "RF",
+    "mlp": "MLP",
+    "cnn1d": "CNN",
+    "tcn": "TCN",
+    "autoformer": "Autoformer",
+    "transformer": "Transformer",
+    "itransformer": "iTransformer",
+}
+
+MODEL_MARKERS = {
+    "proposed": "o",
+    "xgboost": "o",
+    "lightgbm": "s",
+    "mlp": "D",
+    "tcn": "^",
+    "autoformer": "v",
+    "transformer": "P",
+    "itransformer": "X",
+    "logreg": "h",
+    "svm": "p",
+    "random_forest": "*",
+    "cnn1d": "<",
+}
+
+MODEL_COLOR_MAP = {model: MODEL_COLORS[index % len(MODEL_COLORS)] for index, model in enumerate(MODEL_ORDER)}
 
 
 def _read_summary_csv(summary_path: Path) -> list[dict[str, str]]:
@@ -28,7 +127,148 @@ def _read_summary_csv(summary_path: Path) -> list[dict[str, str]]:
 
 def _safe_float(row: dict[str, str], key: str) -> float:
     value = row.get(key, "")
-    return float(value) if value else 0.0
+    return _coerce_float(value)
+
+
+def _coerce_float(value: Any) -> float:
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return 0.0
+    if text.endswith("%"):
+        return float(text[:-1]) / 100.0
+    return float(text)
+
+
+def _normalize_model_name(value: Any) -> str:
+    text = str(value or "").strip()
+    key = text.lower().replace(" ", "_")
+    return MODEL_ALIASES.get(text.lower(), MODEL_ALIASES.get(key, key))
+
+
+def _read_workbook_sheet_rows(workbook_path: Path, sheet_name: str) -> list[dict[str, Any]]:
+    if not workbook_path.is_file():
+        return []
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(workbook_path, data_only=True, read_only=True)
+    try:
+        if sheet_name not in workbook.sheetnames:
+            return []
+        sheet = workbook[sheet_name]
+        values = list(sheet.iter_rows(values_only=True))
+        header_index = next(
+            (
+                index
+                for index, row in enumerate(values)
+                if row and any(cell is not None and str(cell).strip() for cell in row)
+            ),
+            None,
+        )
+        if header_index is None:
+            return []
+        headers = [str(cell).strip() if cell is not None else "" for cell in values[header_index]]
+        rows: list[dict[str, Any]] = []
+        for row in values[header_index + 1 :]:
+            record = {headers[index]: row[index] if index < len(row) else None for index in range(len(headers)) if headers[index]}
+            if any(value not in (None, "") for value in record.values()):
+                rows.append(record)
+        return rows
+    finally:
+        workbook.close()
+
+
+def _workbook_baseline_rows(workbook_path: Path) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    for row in _read_workbook_sheet_rows(workbook_path, "对比实验"):
+        model = _normalize_model_name(row.get("模型名称"))
+        if model == "proposed" or not model:
+            continue
+        ratio = str(row.get("比例") or "").strip().replace("_", ":")
+        if not ratio:
+            continue
+        output.append(
+            {
+                "ratio": ratio,
+                "model": model,
+                "test_accuracy": f"{_coerce_float(row.get('Test Acc')):.10f}",
+                "test_macro_f1": f"{_coerce_float(row.get('Macro-F1')):.10f}",
+                "test_weighted_f1": f"{_coerce_float(row.get('Weighted-F1')):.10f}",
+                "test_inference_ms": f"{_coerce_float(row.get('时间(ms/sample)')):.10f}",
+                "parameter_count": str(int(_coerce_float(row.get("参数量")))),
+                "metrics_path": str(row.get("结果来源") or ""),
+            }
+        )
+    return output
+
+
+def _workbook_noise_rows(workbook_path: Path) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    for row in _read_workbook_sheet_rows(workbook_path, "SNR噪声对比"):
+        model = _normalize_model_name(row.get("model"))
+        if not model:
+            continue
+        snr_db = str(row.get("snr_db") or "").strip()
+        if not snr_db:
+            continue
+        output.append(
+            {
+                "variant": model,
+                "description": "",
+                "scenario": "clean" if snr_db.lower() == "clean" else "workbook_noise",
+                "snr_db": snr_db,
+                "test_accuracy": f"{_coerce_float(row.get('test_accuracy')):.10f}",
+                "test_macro_f1": f"{_coerce_float(row.get('test_macro_f1')):.10f}",
+                "test_weighted_f1": f"{_coerce_float(row.get('test_weighted_f1')):.10f}",
+                "test_inference_ms": f"{_coerce_float(row.get('test_inference_ms')):.10f}",
+            }
+        )
+    return output
+
+
+def _normalize_snr_proposed_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    for row in rows:
+        variant = str(row.get("variant", "")).strip()
+        if variant not in {"full_rbf", "proposed"}:
+            continue
+        normalized = dict(row)
+        normalized["variant"] = "proposed"
+        output.append(normalized)
+    return output
+
+
+def _merge_metric_rows(
+    primary_rows: list[dict[str, str]],
+    extra_rows: list[dict[str, str]],
+    key_fields: tuple[str, ...],
+) -> list[dict[str, str]]:
+    merged: dict[tuple[str, ...], dict[str, str]] = {}
+    order: list[tuple[str, ...]] = []
+    for row in extra_rows + primary_rows:
+        key = tuple(str(row.get(field, "")) for field in key_fields)
+        if key not in merged:
+            order.append(key)
+        merged[key] = row
+    return [merged[key] for key in order]
+
+
+def _write_source_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _load_metrics(results_dir: Path) -> dict[str, Any]:
@@ -119,93 +359,280 @@ def plot_model_comparison(results_dirs: list[Path], output_dir: Path) -> Path:
 def plot_split_summary(
     summary_path: Path,
     output_dir: Path,
-    title: str = "不同训练/测试比例下的模型对比",
+    title: str = "Model comparison under different training ratios",
     output_name: str = "official_split_ratio_summary.png",
+    results_workbook: Path | None = DEFAULT_RESULTS_WORKBOOK,
 ) -> Path:
+    apply_paper_style()
     rows = _read_summary_csv(summary_path)
-    ratio_order = {"8_2": 0, "7_3": 1, "6_4": 2, "5_5": 3}
-    model_order = {
-        "proposed": 0,
-        "logreg": 1,
-        "svm": 2,
-        "random_forest": 3,
-        "mlp": 4,
-        "cnn1d": 5,
-        "lstm": 6,
-        "transformer": 7,
-        "itransformer": 8,
-        "rbf": 9,
-        "no_rbf": 10,
-    }
+    if results_workbook is not None:
+        rows = _merge_metric_rows(rows, _workbook_baseline_rows(results_workbook), ("ratio", "model"))
+    ratio_order = {"5_5": 0, "6_4": 1, "7_3": 2, "8_2": 3}
+    ratio_labels = {"8_2": "80%", "7_3": "70%", "6_4": "60%", "5_5": "50%"}
     ratios = sorted({row["ratio"] for row in rows}, key=lambda item: ratio_order.get(item.replace(":", "_"), 99))
-    models = sorted({row["model"] for row in rows}, key=lambda item: model_order.get(item, 99))
+    reference_ratio = "5:5"
+    reference_values = {
+        row["model"]: _safe_float(row, "test_macro_f1")
+        for row in rows
+        if row.get("ratio", "").replace("_", ":") == reference_ratio
+    }
+    models = sorted(
+        {row["model"] for row in rows},
+        key=lambda item: (
+            reference_values.get(item, float("inf")),
+            MODEL_ORDER.index(item) if item in MODEL_ORDER else 99,
+            item,
+        ),
+    )
     x = np.arange(len(ratios))
-    width = 0.8 / max(len(models), 1)
 
-    fig, ax = plt.subplots(figsize=(max(9.0, len(ratios) * max(2.2, len(models) * 0.55)), 5.6))
-    colors = ["#4e79a7", "#e15759", "#59a14f", "#f28e2b", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ab", "#76b7b2", "#edc948"]
-    for index, model in enumerate(models):
-        values: list[float] = []
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=figsize_full(height_cm=16.0),
+        sharex=True,
+        gridspec_kw={"hspace": STACKED_SUBPLOT_ONE_LINE_HSPACE},
+    )
+    for ax, (panel_tag, metric_col, ylabel, y_floor, nominal_y_max) in zip(axes, METRIC_SPECS):
+        metric_values = [
+            _safe_float(row, metric_col) * 100.0
+            for row in rows
+            if row.get("model") in models and row.get("ratio") in ratios
+        ]
+        y_min = min(y_floor, max(0.0, float(np.floor((min(metric_values) - 2.0) / 10.0) * 10.0))) if metric_values else y_floor
+        proposed_values: list[float] = []
         for ratio in ratios:
-            matched = [row for row in rows if row["ratio"] == ratio and row["model"] == model]
-            values.append(_safe_float(matched[-1], "test_macro_f1") if matched else 0.0)
-        offset = (index - (len(models) - 1) / 2) * width
-        bars = ax.bar(x + offset, values, width, label=model, color=colors[index % len(colors)])
-        for bar in bars:
-            value = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width() / 2, value + 0.012, f"{value:.3f}", ha="center", va="bottom", fontsize=8, rotation=90)
+            matched = [row for row in rows if row["ratio"] == ratio and row["model"] == "proposed"]
+            if matched:
+                proposed_values.append(_safe_float(matched[-1], metric_col) * 100.0)
+        _, y_max = ylim_with_inside_text(max(proposed_values or [nominal_y_max]), y_min, upper=nominal_y_max)
+        for model in models:
+            values = []
+            for ratio in ratios:
+                matched = [row for row in rows if row["ratio"] == ratio and row["model"] == model]
+                values.append(_safe_float(matched[-1], metric_col) * 100.0 if matched else np.nan)
+            is_proposed = model == "proposed"
+            ax.plot(
+                x,
+                values,
+                color=MODEL_COLOR_MAP.get(model, "black"),
+                marker=MODEL_MARKERS.get(model, "o"),
+                markersize=4.8 if is_proposed else 3.8,
+                linewidth=2.0 if is_proposed else 1.05,
+                markerfacecolor=MODEL_COLOR_MAP.get(model, "black") if is_proposed else "white",
+                markeredgecolor=MODEL_COLOR_MAP.get(model, "black"),
+                markeredgewidth=0.9,
+                alpha=1.0 if is_proposed else 0.88,
+                label=MODEL_LABELS.get(model, model),
+                zorder=5 if is_proposed else 3,
+            )
+            if is_proposed:
+                for xi, yi in zip(x, values):
+                    if np.isnan(yi):
+                        continue
+                    ax.text(
+                        xi,
+                        inside_text_y(float(yi), y_min, y_max),
+                        f"{yi:.2f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=ANNOTATION_SIZE,
+                        fontweight="bold",
+                        color="black",
+                        clip_on=True,
+                    )
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(y_min, y_max)
+        ax.set_yticks(np.arange(int(y_min), int(nominal_y_max) + 1, 10))
+        style_axes(ax, grid_axis="y")
+        add_panel_tag(ax, panel_tag)
+        show_shared_x_axis(ax, x, [ratio_labels.get(r.replace(":", "_"), r) for r in ratios], "Training set ratio")
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([ratio.replace("_", ":") for ratio in ratios])
-    ax.set_ylim(0, 1.05)
-    ax.set_xlabel("训练集:测试集比例")
-    ax.set_ylabel("测试集宏平均F1")
-    ax.set_title(title)
-    ax.legend(ncol=min(4, max(len(models), 1)), fontsize=9)
-    fig.tight_layout()
+    handles, labels = axes[0].get_legend_handles_labels()
+    legend = axes[0].legend(
+        handles,
+        labels,
+        ncol=4,
+        loc="lower left",
+        bbox_to_anchor=(0.0, 1.18, 1.0, 0.06),
+        bbox_transform=axes[0].transAxes,
+        mode="expand",
+        handlelength=1.6,
+        columnspacing=1.0,
+        borderaxespad=0,
+        **LEGEND_KWARGS,
+    )
+    style_legend_frame(legend)
+    add_bottom_caption(fig, "(a) Accuracy; (b) Macro-F1; (c) Weighted-F1.")
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.84, bottom=0.16, hspace=STACKED_SUBPLOT_ONE_LINE_HSPACE)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / output_name
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    save_paper_figure(fig, str(path.with_suffix("")), formats=PAPER_OUTPUT_FORMATS)
     plt.close(fig)
     return path
 
 
-def plot_baseline_summary(summary_path: Path, output_dir: Path) -> Path:
+def plot_baseline_summary(summary_path: Path, output_dir: Path, results_workbook: Path | None = DEFAULT_RESULTS_WORKBOOK) -> Path:
     return plot_split_summary(
         summary_path,
         output_dir,
-        title="提出模型与传统机器学习/深度学习/Transformer 基准对比",
+        title="",
         output_name="official_baseline_comparison_summary.png",
+        results_workbook=results_workbook,
     )
 
 
-def plot_noise_summary(summary_path: Path, output_dir: Path) -> Path:
+def plot_noise_summary(summary_path: Path, output_dir: Path, results_workbook: Path | None = DEFAULT_RESULTS_WORKBOOK) -> Path:
+    apply_paper_style()
     rows = _read_summary_csv(summary_path)
-    model_order = {"rbf": 0, "no_rbf": 1}
-    models = sorted({row["model"] for row in rows}, key=lambda item: model_order.get(item, 99))
-    noise_stds = sorted({_safe_float(row, "noise_std") for row in rows})
-    colors = ["#4e79a7", "#e15759", "#59a14f", "#f28e2b"]
+    if rows and "variant" in rows[0] and "snr_db" in rows[0]:
+        rows = _normalize_snr_proposed_rows(rows)
+        if results_workbook is not None:
+            comparison_rows = [row for row in _workbook_noise_rows(results_workbook) if row.get("variant") != "proposed"]
+            rows = _merge_metric_rows(rows, comparison_rows, ("variant", "snr_db"))
+        model_key = "variant"
+        x_key = "snr_db"
+        x_label = "SNR (dB)"
+        x_values = sorted(
+            {row[x_key] for row in rows},
+            key=lambda value: 99.0 if str(value).lower() == "clean" else -float(value),
+        )
+        x_positions = np.arange(len(x_values))
+        x_ticklabels = [str(value) for value in x_values]
+    else:
+        model_key = "model"
+        x_key = "noise_std"
+        x_label = "Relative Gaussian noise standard deviation"
+        numeric_values = sorted({_safe_float(row, x_key) for row in rows})
+        x_values = [str(value) for value in numeric_values]
+        x_positions = np.asarray(numeric_values, dtype=float)
+        x_ticklabels = [str(value) for value in numeric_values]
+    model_order = {
+        "full_rbf": 0,
+        "proposed": 0,
+        "rbf": 0,
+        "xgboost": 1,
+        "lightgbm": 2,
+        "logreg": 3,
+        "svm": 4,
+        "random_forest": 5,
+        "mlp": 6,
+        "cnn1d": 7,
+        "tcn": 8,
+        "autoformer": 9,
+        "transformer": 10,
+        "itransformer": 11,
+        "no_rbf": 12,
+        "no_kan_fusion": 13,
+        "static_prototype": 14,
+        "no_condition_input": 15,
+    }
+    display_names = {
+        "full_rbf": "CAPT-UniShape",
+        "proposed": "CAPT-UniShape",
+        "rbf": "RBF",
+        "xgboost": "XGBoost",
+        "lightgbm": "LightGBM",
+        "logreg": "LR",
+        "svm": "SVM",
+        "random_forest": "RF",
+        "mlp": "MLP",
+        "cnn1d": "CNN",
+        "tcn": "TCN",
+        "autoformer": "Autoformer",
+        "transformer": "Transformer",
+        "itransformer": "iTransformer",
+        "no_rbf": "No-RBF",
+        "no_kan_fusion": "No-KAN-Fusion",
+        "static_prototype": "Static-Prototype",
+        "no_condition_input": "No-Condition",
+    }
+    models = sorted({row[model_key] for row in rows}, key=lambda item: model_order.get(item, 99))
+    colors = ["#c8d400", "#ef3b4a", "#31c44f", "#c24db6", "#5ab5e8", "#f47b36", "#9bdbe0", "#2b8c8c", "#c66a2e", "#b78a8e", "#6b5fd3", "#e2d61a"]
 
-    fig, ax = plt.subplots(figsize=(8.2, 5.2))
-    for index, model in enumerate(models):
-        values: list[float] = []
-        for noise_std in noise_stds:
-            matched = [row for row in rows if row["model"] == model and abs(_safe_float(row, "noise_std") - noise_std) < 1e-12]
-            values.append(_safe_float(matched[-1], "test_macro_f1") if matched else 0.0)
-        ax.plot(noise_stds, values, marker="o", linewidth=2.0, label=model, color=colors[index % len(colors)])
-        for x_value, y_value in zip(noise_stds, values):
-            ax.text(x_value, y_value + 0.015, f"{y_value:.3f}", ha="center", va="bottom", fontsize=9)
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=figsize_full(height_cm=17.0),
+        sharex=True,
+        gridspec_kw={"hspace": STACKED_SUBPLOT_ONE_LINE_HSPACE},
+    )
+    for ax, (panel_tag, metric_col, ylabel, y_floor, nominal_y_max) in zip(axes, METRIC_SPECS):
+        metric_values = [_safe_float(row, metric_col) * 100.0 for row in rows]
+        y_min = min(y_floor, max(0.0, float(np.floor((min(metric_values) - 2.0) / 10.0) * 10.0))) if metric_values else y_floor
+        proposed_rows = [row for row in rows if row.get(model_key) == "proposed"]
+        proposed_values = [_safe_float(row, metric_col) * 100.0 for row in proposed_rows]
+        _, y_max = ylim_with_inside_text(max(proposed_values or [nominal_y_max]), y_min, upper=nominal_y_max)
+        for model in models:
+            values: list[float] = []
+            for x_value in x_values:
+                if x_key == "noise_std":
+                    matched = [
+                        row
+                        for row in rows
+                        if row[model_key] == model and abs(_safe_float(row, x_key) - float(x_value)) < 1e-12
+                    ]
+                else:
+                    matched = [row for row in rows if row[model_key] == model and str(row[x_key]) == str(x_value)]
+                values.append(_safe_float(matched[-1], metric_col) * 100.0 if matched else np.nan)
+            is_proposed = model == "proposed"
+            ax.plot(
+                x_positions,
+                values,
+                marker=MODEL_MARKERS.get(model, "o"),
+                markersize=5.1 if is_proposed else 4.0,
+                linewidth=2.1 if is_proposed else 1.15,
+                markerfacecolor=MODEL_COLOR_MAP.get(model, "black") if is_proposed else "white",
+                markeredgecolor=MODEL_COLOR_MAP.get(model, "black"),
+                markeredgewidth=0.9,
+                label=display_names.get(model, model),
+                color=MODEL_COLOR_MAP.get(model, colors[models.index(model) % len(colors)]),
+                zorder=4 if is_proposed else 3,
+            )
+            if is_proposed:
+                for xi, yi in zip(x_positions, values):
+                    if np.isnan(yi):
+                        continue
+                    text_ha = "left" if xi == x_positions.min() else "right" if xi == x_positions.max() else "center"
+                    ax.text(
+                        xi,
+                        inside_text_y(float(yi), y_min, y_max),
+                        f"{yi:.2f}",
+                        ha=text_ha,
+                        va="bottom",
+                        fontsize=ANNOTATION_SIZE,
+                        color="black",
+                        fontweight="bold",
+                        clip_on=True,
+                    )
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(y_min, y_max)
+        ax.set_yticks(np.arange(int(y_min), int(nominal_y_max) + 1, 10))
+        style_axes(ax, grid_axis="y")
+        add_panel_tag(ax, panel_tag)
+        show_shared_x_axis(ax, x_positions, x_ticklabels, x_label)
 
-    ax.set_ylim(0, 1.05)
-    ax.set_xlabel("测试集相对高斯噪声标准差")
-    ax.set_ylabel("测试集宏平均F1")
-    ax.set_title("单一训练/测试比例下的噪声鲁棒性")
-    ax.grid(True, linestyle="--", alpha=0.35)
-    ax.legend()
-    fig.tight_layout()
+    handles, labels = axes[0].get_legend_handles_labels()
+    legend = axes[0].legend(
+        handles,
+        labels,
+        ncol=4,
+        loc="lower left",
+        bbox_to_anchor=(0.0, 1.18, 1.0, 0.06),
+        bbox_transform=axes[0].transAxes,
+        mode="expand",
+        handlelength=1.6,
+        columnspacing=1.0,
+        borderaxespad=0,
+        **LEGEND_KWARGS,
+    )
+    style_legend_frame(legend)
+    add_bottom_caption(fig, "(a) Accuracy; (b) Macro-F1; (c) Weighted-F1.")
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.84, bottom=0.16, hspace=STACKED_SUBPLOT_ONE_LINE_HSPACE)
     output_dir.mkdir(parents=True, exist_ok=True)
+    _write_source_csv(output_dir / "official_noise_summary_source.csv", rows)
     path = output_dir / "official_noise_summary.png"
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    save_paper_figure(fig, str(path.with_suffix("")), formats=PAPER_OUTPUT_FORMATS)
     plt.close(fig)
     return path
 
@@ -246,20 +673,22 @@ def main() -> None:
     parser.add_argument("--baseline-summary", help="基准模型对比实验输出的 summary.csv")
     parser.add_argument("--ablation-summary", help="消融实验输出的 summary.csv")
     parser.add_argument("--noise-summary", help="噪声鲁棒性实验输出的 summary.csv")
+    parser.add_argument("--results-workbook", default=str(DEFAULT_RESULTS_WORKBOOK), help="用于补充对比模型指标的实验结果总表 xlsx；传空字符串则不合并")
     parser.add_argument("--output-dir", default="figures/official_unishape")
     args = parser.parse_args()
 
     result_dirs = [Path(item) for item in args.results]
     output_dir = Path(args.output_dir)
+    results_workbook = Path(args.results_workbook) if args.results_workbook else None
     written: list[Path] = [plot_confusion_matrix(path, output_dir) for path in result_dirs]
     if len(result_dirs) >= 2:
         written.append(plot_model_comparison(result_dirs, output_dir))
     if args.baseline_summary:
-        written.append(plot_baseline_summary(Path(args.baseline_summary), output_dir))
+        written.append(plot_baseline_summary(Path(args.baseline_summary), output_dir, results_workbook=results_workbook))
     if args.ablation_summary:
         written.append(plot_ablation_summary(Path(args.ablation_summary), output_dir))
     if args.noise_summary:
-        written.append(plot_noise_summary(Path(args.noise_summary), output_dir))
+        written.append(plot_noise_summary(Path(args.noise_summary), output_dir, results_workbook=results_workbook))
     if not written:
         parser.error("请至少提供 --results、--baseline-summary、--ablation-summary 或 --noise-summary 其中之一")
     for path in written:

@@ -135,9 +135,9 @@ class FeatureEmbeddingVisualizationTests(unittest.TestCase):
         prepared, source_col, label_map = _prepare_label_column(frame)
 
         self.assertEqual(source_col, "label")
-        self.assertEqual(prepared[LABEL_COL].tolist(), [0, 1, 1, 2, 2])
-        self.assertEqual(label_map["过湿"], 1)
-        self.assertEqual(label_map["过干"], 2)
+        self.assertEqual(prepared[LABEL_COL].tolist(), [0, 2, 2, 1, 1])
+        self.assertEqual(label_map["过湿"], 2)
+        self.assertEqual(label_map["过干"], 1)
 
     def test_raw_excel_all_numeric_mode_uses_supplemental_numeric_columns(self) -> None:
         import pandas as pd

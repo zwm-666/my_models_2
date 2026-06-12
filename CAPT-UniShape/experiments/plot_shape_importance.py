@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-CLASS_NAMES = ["正常", "过湿", "过干"]
-CLASS_DISPLAY_NAMES = ["Normal", "Over-wet", "Over-dry"]
+CLASS_NAMES = ["正常", "过干/膜干", "过湿/水淹"]
+CLASS_DISPLAY_NAMES = ["Normal", "Drying", "Flooding"]
 CHANNEL_NAMES = [
     "Interpolated curve",
     "Gradient shape",
@@ -227,7 +227,7 @@ def write_meta(
         "train_count": int(train_count),
         "test_count": int(test_count),
         "channels": CHANNEL_NAMES,
-        "label_mapping": {"正常": 0, "过湿/水淹": 1, "过干/膜干": 2},
+        "label_mapping": {"正常": 0, "过干/膜干": 1, "过湿/水淹": 2},
         "limitation": "This is input shape-channel importance from a reproducible shape-only proxy model because no trained CAPT-UniShape checkpoint is present in the workspace.",
         "figure": str(figure_path),
         "csv": str(csv_path),

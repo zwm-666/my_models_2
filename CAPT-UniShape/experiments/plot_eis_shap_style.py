@@ -47,9 +47,9 @@ from plot_style import (  # noqa: E402
 )
 
 
-CLASS_ORDER = [0, 2, 1]
+CLASS_ORDER = [0, 1, 2]
 CLASS_COLORS = {2: MODEL_COLORS[3], 0: MODEL_COLORS[0], 1: MODEL_COLORS[2]}
-CLASS_NAMES = {0: "Normal", 1: "Flooding", 2: "Drying"}
+CLASS_NAMES = {0: "Normal", 1: "Drying", 2: "Flooding"}
 LABEL_ALIASES = [LABEL_COL, "类型", "label", "Label", "标签"]
 FEATURE_NAME_EN = {
     "总阻抗": "Total impedance",
@@ -96,7 +96,7 @@ def _read_excel_with_labels(excel_path: Path, sheet_name: str) -> pd.DataFrame:
     if source != LABEL_COL:
         frame[LABEL_COL] = frame[source]
     if frame[LABEL_COL].dtype == object:
-        mapping = {"正常": 0, "过湿": 1, "水淹": 1, "过干": 2, "膜干": 2}
+        mapping = {"正常": 0, "过干": 1, "膜干": 1, "过湿": 2, "水淹": 2}
         values = frame[LABEL_COL].astype(str).str.strip()
         unknown = set(values.unique()) - set(mapping)
         if unknown:

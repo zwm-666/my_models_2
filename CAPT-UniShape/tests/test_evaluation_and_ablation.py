@@ -8,6 +8,152 @@ import numpy as np
 import torch
 
 
+class BaselineComparisonFigureTests(unittest.TestCase):
+    def test_named_comparison_figure_script_writes_grouped_bar_chart(self) -> None:
+        from experiments.utils.plot_results import plot_baseline_summary
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            summary_path = tmp_path / "summary.csv"
+            summary_path.write_text(
+                "\n".join(
+                    [
+                        "ratio,model,test_macro_f1,test_accuracy",
+                        "8_2,proposed,0.98,0.99",
+                        "8_2,tcn,0.72,0.75",
+                        "7_3,proposed,0.97,0.98",
+                        "7_3,tcn,0.68,0.70",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            output_path = plot_baseline_summary(summary_path, tmp_path)
+            self.assertEqual(output_path.name, "official_baseline_comparison_summary.png")
+            self.assertTrue(output_path.is_file())
+
+    def test_baseline_summary_plot_merges_comparison_rows_from_workbook(self) -> None:
+        from openpyxl import Workbook
+
+        from experiments.utils.plot_results import _workbook_baseline_rows, plot_baseline_summary
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            summary_path = tmp_path / "summary.csv"
+            summary_path.write_text("ratio,model,test_macro_f1,test_accuracy\n8:2,proposed,1.0,1.0\n", encoding="utf-8")
+            workbook_path = tmp_path / "results.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "对比实验"
+            sheet.append(["数据集", "比例", "模型名称", "Test Acc", "Macro-F1", "Weighted-F1", "时间(ms/sample)", "参数量", "结果来源"])
+            sheet.append(["自测数据集", "8:2", "SVM", "89.39%", "58.62%", "85.37%", 0.02, 6, "metrics.json"])
+            workbook.save(workbook_path)
+
+            rows = _workbook_baseline_rows(workbook_path)
+            output_path = plot_baseline_summary(summary_path, tmp_path, results_workbook=workbook_path)
+
+            self.assertEqual(rows[0]["model"], "svm")
+            self.assertAlmostEqual(float(rows[0]["test_macro_f1"]), 0.5862)
+            self.assertTrue(output_path.is_file())
+
+    def test_baseline_summary_orders_ratios_from_small_to_large_training_share(self) -> None:
+        from experiments.utils.plot_results import _read_summary_csv, _safe_float
+
+        with TemporaryDirectory() as tmpdir:
+            summary_path = Path(tmpdir) / "summary.csv"
+            summary_path.write_text(
+                "\n".join(
+                    [
+                        "ratio,model,test_macro_f1,test_accuracy",
+                        "8_2,proposed,1.0,1.0",
+                        "5_5,proposed,0.90,0.90",
+                        "5_5,svm,0.60,0.70",
+                        "6_4,svm,0.61,0.71",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rows = _read_summary_csv(summary_path)
+            ratio_order = {"5_5": 0, "6_4": 1, "7_3": 2, "8_2": 3}
+            ratios = sorted({row["ratio"] for row in rows}, key=lambda item: ratio_order.get(item.replace(":", "_"), 99))
+            reference_values = {
+                row["model"]: _safe_float(row, "test_macro_f1")
+                for row in rows
+                if row.get("ratio", "").replace("_", ":") == "5:5"
+            }
+            models = sorted({row["model"] for row in rows}, key=lambda item: reference_values.get(item, float("inf")))
+
+            self.assertEqual(ratios, ["5_5", "6_4", "8_2"])
+            self.assertEqual(models, ["svm", "proposed"])
+
+    def test_noise_summary_plot_accepts_snr_ablation_rows(self) -> None:
+        from experiments.utils.plot_results import plot_noise_summary
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            summary_path = tmp_path / "snr_summary.csv"
+            summary_path.write_text(
+                "\n".join(
+                    [
+                        "variant,scenario,snr_db,test_macro_f1",
+                        "full_rbf,clean,clean,1.0",
+                        "full_rbf,low_noise,30,0.91",
+                        "full_rbf,high_noise,5,0.60",
+                        "no_rbf,clean,clean,1.0",
+                        "no_rbf,low_noise,30,0.88",
+                        "no_rbf,high_noise,5,0.53",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            output_path = plot_noise_summary(summary_path, tmp_path)
+            self.assertEqual(output_path.name, "official_noise_summary.png")
+            self.assertTrue(output_path.is_file())
+
+    def test_noise_summary_plot_uses_workbook_comparison_models_only(self) -> None:
+        from openpyxl import Workbook
+
+        from experiments.utils.plot_results import _read_summary_csv, _workbook_noise_rows, plot_noise_summary
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            summary_path = tmp_path / "snr_summary.csv"
+            summary_path.write_text(
+                "\n".join(
+                    [
+                        "variant,scenario,snr_db,test_macro_f1",
+                        "full_rbf,clean,clean,1.0",
+                        "full_rbf,low_noise,30,0.91",
+                        "no_rbf,clean,clean,0.80",
+                        "no_rbf,low_noise,30,0.70",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            workbook_path = tmp_path / "results.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "SNR噪声对比"
+            sheet.append(["model", "snr_db", "test_accuracy", "accuracy_drop", "test_macro_f1", "macro_f1_drop"])
+            sheet.append(["proposed", 30, 0.50, 0, 0.50, 0])
+            sheet.append(["svm", "clean", 0.8934, 0, 0.875, 0])
+            sheet.append(["svm", 30, 0.8962, -0.0027, 0.8776, -0.0026])
+            workbook.save(workbook_path)
+
+            rows = _workbook_noise_rows(workbook_path)
+            output_path = plot_noise_summary(summary_path, tmp_path, results_workbook=workbook_path)
+
+            self.assertEqual({row["variant"] for row in rows}, {"proposed", "svm"})
+            merged_rows = _read_summary_csv(tmp_path / "official_noise_summary_source.csv")
+            self.assertEqual({row["variant"] for row in merged_rows}, {"proposed", "svm"})
+            self.assertAlmostEqual(
+                float([row for row in merged_rows if row["variant"] == "proposed" and row["snr_db"] == "30"][-1]["test_macro_f1"]),
+                0.91,
+            )
+            self.assertTrue(output_path.is_file())
+
+
 class EvaluationSplitTests(unittest.TestCase):
     def test_split_indices_from_npz_selects_only_requested_split(self) -> None:
         from evaluate import split_indices_from_npz
@@ -83,26 +229,27 @@ class AblationSwitchTests(unittest.TestCase):
         expected = {
             "no_rbf": {
                 "use_rbf_head": False,
-                "hidden_dim": 64,
-                "fusion_hidden_dim": 64,
-                "dropout": 0.3,
+                "hidden_dim": 32,
+                "fusion_hidden_dim": 32,
+                "dropout": 0.45,
             },
             "no_kan_fusion": {
                 "use_residual_kan_fusion": False,
-                "fusion_hidden_dim": 64,
-                "dropout": 0.3,
+                "hidden_dim": 64,
+                "fusion_hidden_dim": 32,
+                "dropout": 0.45,
             },
             "static_prototype": {
                 "use_condition_transport": False,
-                "hidden_dim": 128,
-                "fusion_hidden_dim": 128,
-                "num_rbf_centers": 4,
-                "dropout": 0.25,
+                "hidden_dim": 64,
+                "fusion_hidden_dim": 32,
+                "num_rbf_centers": 2,
+                "dropout": 0.45,
             },
             "no_condition_input": {
-                "hidden_dim": 64,
-                "fusion_hidden_dim": 64,
-                "dropout": 0.3,
+                "hidden_dim": 32,
+                "fusion_hidden_dim": 32,
+                "dropout": 0.5,
             },
         }
         for variant, expected_overrides in expected.items():
@@ -266,6 +413,31 @@ class AblationSwitchTests(unittest.TestCase):
         self.assertTrue(torch.equal(z_fused, z_op + z_eis + z_cond))
         self.assertTrue(torch.equal(g_op, torch.ones_like(z_op)))
         self.assertTrue(torch.equal(g_eis, torch.ones_like(z_eis)))
+
+
+class OfficialNoiseExperimentCLITests(unittest.TestCase):
+    def test_noise_experiment_defaults_to_five_five_official_run(self) -> None:
+        from experiments.run_official_noise_experiments import MODELS, parse_args
+
+        args = parse_args([])
+
+        self.assertEqual(args.ratio, "5_5")
+        self.assertEqual(args.models, ["proposed"])
+        self.assertEqual(args.seed, 44)
+        self.assertIn("noise_5_5", args.output_root)
+        self.assertIn("noise_5_5", args.data_root)
+        self.assertEqual(set(MODELS), {"proposed"})
+        self.assertEqual(MODELS["proposed"], "configs/proposed.yaml")
+
+    def test_noise_experiment_defaults_to_snr_five_to_forty_by_five(self) -> None:
+        from experiments.run_official_noise_experiments import parse_args
+
+        args = parse_args([])
+
+        self.assertEqual(args.snr_dbs, [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0])
+        self.assertEqual(args.snr_scope, "per_sample_modality")
+        self.assertIn("snr", args.output_root)
+        self.assertIn("snr", args.data_root)
 
 
 class TrainingUtilityTests(unittest.TestCase):

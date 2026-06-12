@@ -43,7 +43,7 @@ from src.datasets.self_dataset import COND_COLS, EIS_COLS, STACK_COLS, TIME_COL 
 RAW_EXCEL = ROOT / "data" / "raw" / "水淹和膜干故障测试数据_补充特征汇总.xlsx"
 OUT_DIR = FIG_DIR / "condition_selection"
 LABEL_ALIASES = ["label", "Label", "标签", "类型"]
-RAW_LABEL_MAP = {"正常": 0, "过湿": 1, "水淹": 1, "过干": 2, "膜干": 2}
+RAW_LABEL_MAP = {"正常": 0, "过干": 1, "膜干": 1, "过湿": 2, "水淹": 2}
 
 COND_DISPLAY = {
     "FC系统入口高压": "System inlet pressure",
