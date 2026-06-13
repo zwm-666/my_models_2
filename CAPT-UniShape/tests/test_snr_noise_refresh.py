@@ -184,6 +184,93 @@ class SnrNoiseRefreshTests(unittest.TestCase):
         self.assertEqual(args.summary_path, "results\\噪声对齐论文实验新表.csv")
         self.assertEqual(args.snr_scope, "per_sample_modality")
         self.assertEqual(args.noise_repeats, 1)
+        self.assertEqual(args.baseline_profile, "noise_moderate")
+
+    def test_noise_moderate_profile_uses_window_level_reduced_baselines(self) -> None:
+        xgboost = snr.apply_baseline_profile(
+            "xgboost",
+            {
+                "setting_name": "segment_xgboost_eis_cond_pca4",
+                "input_protocol": "segment_level_non_window",
+                "feature_scope": "x_eis+x_cond",
+                "pca_components": 4,
+                "n_estimators": 80,
+                "max_depth": 2,
+            },
+            "noise_moderate",
+        )
+        lightgbm = snr.apply_baseline_profile(
+            "lightgbm",
+            {
+                "setting_name": "segment_lightgbm_eis_cond_pca4_stump",
+                "input_protocol": "segment_level_non_window",
+                "feature_scope": "x_eis+x_cond",
+                "pca_components": 4,
+                "n_estimators": 40,
+                "max_depth": 1,
+                "num_leaves": 3,
+            },
+            "noise_moderate",
+        )
+        mlp = snr.apply_baseline_profile(
+            "mlp",
+            {
+                "feature_scope": "x_cond_only",
+                "hidden_dim": 12,
+                "dropout": 0.5,
+                "epochs": 18,
+            },
+            "noise_moderate",
+        )
+
+        self.assertNotIn("input_protocol", xgboost)
+        self.assertEqual(xgboost["feature_scope"], "x_eis+x_cond")
+        self.assertIsNone(xgboost["pca_components"])
+        self.assertEqual(int(xgboost["n_estimators"]), 40)
+        self.assertEqual(int(xgboost["max_depth"]), 2)
+
+        self.assertNotIn("input_protocol", lightgbm)
+        self.assertEqual(lightgbm["feature_scope"], "x_op+x_eis")
+        self.assertIsNone(lightgbm["pca_components"])
+        self.assertEqual(int(lightgbm["n_estimators"]), 40)
+        self.assertEqual(int(lightgbm["num_leaves"]), 5)
+
+        self.assertEqual(mlp["feature_scope"], "x_op+x_cond")
+        self.assertEqual(int(mlp["hidden_dim"]), 20)
+        self.assertAlmostEqual(float(mlp["dropout"]), 0.5)
+        self.assertEqual(int(mlp["epochs"]), 20)
+        self.assertEqual(mlp["class_weighting"], "none")
+
+        tcn = snr.apply_baseline_profile(
+            "tcn",
+            {
+                "feature_scope": "x_op+x_cond",
+                "hidden_dim": 6,
+                "dropout": 0.6,
+                "epochs": 7,
+            },
+            "noise_moderate",
+        )
+        transformer = snr.apply_baseline_profile(
+            "transformer",
+            {
+                "d_model": 24,
+                "num_layers": 1,
+                "dropout": 0.35,
+                "epochs": 20,
+            },
+            "noise_moderate",
+        )
+
+        self.assertEqual(tcn["feature_scope"], "all_modalities")
+        self.assertEqual(int(tcn["hidden_dim"]), 16)
+        self.assertAlmostEqual(float(tcn["dropout"]), 0.4)
+        self.assertEqual(int(tcn["epochs"]), 20)
+
+        self.assertEqual(transformer["feature_scope"], "x_op+x_cond")
+        self.assertEqual(int(transformer["d_model"]), 16)
+        self.assertAlmostEqual(float(transformer["dropout"]), 0.45)
+        self.assertEqual(int(transformer["epochs"]), 18)
 
     def test_compact_summary_uses_required_headers_and_four_decimals(self) -> None:
         import tempfile
@@ -1422,7 +1509,7 @@ excluded_models:
 
         self.assertEqual(
             list(baselines.keys()),
-            ["xgboost", "lightgbm", "mlp", "tcn", "autoformer"],
+            ["xgboost", "lightgbm", "mlp", "tcn", "autoformer", "transformer", "itransformer"],
         )
 
         self.assertEqual(baselines["xgboost"]["input_protocol"], "segment_level_non_window")

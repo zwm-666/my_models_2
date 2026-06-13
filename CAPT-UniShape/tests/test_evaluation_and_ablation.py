@@ -205,6 +205,20 @@ class BaselineComparisonFigureTests(unittest.TestCase):
             self.assertAlmostEqual(_safe_metric_float(baseline_5db, "test_weighted_f1"), 0.78)
             self.assertTrue(output_path.is_file())
 
+    def test_noise_axis_lower_bound_tracks_visible_metric_range(self) -> None:
+        from experiments.utils.plot_results import _noise_axis_limits_and_ticks
+
+        y_min, y_max, ticks = _noise_axis_limits_and_ticks(
+            metric_values=[73.94, 89.09, 95.76, 100.0],
+            proposed_values=[95.76, 98.18, 100.0],
+            nominal_y_max=100.0,
+        )
+
+        self.assertEqual(y_min, 70.0)
+        self.assertGreater(y_max, 100.0)
+        self.assertEqual(ticks[0], 70.0)
+        self.assertEqual(ticks[-1], 100.0)
+
 
 class EvaluationSplitTests(unittest.TestCase):
     def test_split_indices_from_npz_selects_only_requested_split(self) -> None:

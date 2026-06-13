@@ -161,6 +161,26 @@ def _fill_metric_aliases(row: dict[str, str]) -> dict[str, str]:
     return normalized
 
 
+def _noise_axis_limits_and_ticks(
+    metric_values: list[float],
+    proposed_values: list[float],
+    nominal_y_max: float,
+) -> tuple[float, float, np.ndarray[Any, Any]]:
+    finite_values = [float(value) for value in metric_values if np.isfinite(value)]
+    if finite_values:
+        y_min = max(0.0, float(np.floor((min(finite_values) - 2.0) / 5.0) * 5.0))
+    else:
+        y_min = 0.0
+    proposed_top = max(proposed_values or [nominal_y_max])
+    _, y_max = ylim_with_inside_text(proposed_top, y_min, upper=nominal_y_max)
+    tick_values = np.arange(y_min, nominal_y_max + 0.1, 10.0)
+    if tick_values.size == 0 or abs(float(tick_values[0]) - y_min) > 1e-9:
+        tick_values = np.insert(tick_values, 0, y_min)
+    if abs(float(tick_values[-1]) - float(nominal_y_max)) > 1e-9:
+        tick_values = np.append(tick_values, float(nominal_y_max))
+    return y_min, y_max, tick_values
+
+
 def _coerce_float(value: Any) -> float:
     if value is None or value == "":
         return 0.0
@@ -601,10 +621,9 @@ def plot_noise_summary(summary_path: Path, output_dir: Path, results_workbook: P
     )
     for ax, (panel_tag, metric_col, ylabel, y_floor, nominal_y_max) in zip(axes, METRIC_SPECS):
         metric_values = [_safe_metric_float(row, metric_col) * 100.0 for row in rows]
-        y_min = min(y_floor, max(0.0, float(np.floor((min(metric_values) - 2.0) / 10.0) * 10.0))) if metric_values else y_floor
         proposed_rows = [row for row in rows if row.get(model_key) == "proposed"]
         proposed_values = [_safe_metric_float(row, metric_col) * 100.0 for row in proposed_rows]
-        _, y_max = ylim_with_inside_text(max(proposed_values or [nominal_y_max]), y_min, upper=nominal_y_max)
+        y_min, y_max, y_ticks = _noise_axis_limits_and_ticks(metric_values, proposed_values, nominal_y_max)
         for model in models:
             values: list[float] = []
             for x_value in x_values:
@@ -649,7 +668,7 @@ def plot_noise_summary(summary_path: Path, output_dir: Path, results_workbook: P
                     )
         ax.set_ylabel(ylabel)
         ax.set_ylim(y_min, y_max)
-        ax.set_yticks(np.arange(int(y_min), int(nominal_y_max) + 1, 10))
+        ax.set_yticks(y_ticks)
         style_axes(ax, grid_axis="y")
         add_panel_tag(ax, panel_tag)
         show_shared_x_axis(ax, x_positions, x_ticklabels, x_label)

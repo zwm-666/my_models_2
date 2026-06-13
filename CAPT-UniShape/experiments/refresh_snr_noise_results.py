@@ -202,6 +202,111 @@ def resolve_model_run_settings(config_payload: dict[str, Any], model_key: str, r
     return _ratio_override(settings, ratio_key=ratio_key)
 
 
+def apply_baseline_profile(model_key: str, settings: dict[str, Any], profile: str = "comparison") -> dict[str, Any]:
+    normalized_profile = str(profile or "comparison").strip().lower().replace("-", "_")
+    if normalized_profile in {"comparison", "configured", "current"}:
+        return dict(settings)
+    if normalized_profile not in {"noise_window_full", "noise_moderate"}:
+        raise ValueError(f"不支持 baseline_profile={profile!r}")
+
+    updated = dict(settings)
+    updated["feature_scope"] = "all_modalities"
+    if normalized_profile == "noise_moderate":
+        moderate_scopes = {
+            "xgboost": "x_eis+x_cond",
+            "lightgbm": "x_op+x_eis",
+        }
+        updated["feature_scope"] = moderate_scopes.get(model_key, "all_modalities")
+    if model_key in {"xgboost", "lightgbm", "logreg", "svm", "random_forest"}:
+        updated.pop("input_protocol", None)
+        updated.pop("segment_statistics", None)
+        updated["pca_components"] = None
+        updated["use_scaler"] = bool(updated.get("use_scaler", model_key not in {"xgboost", "lightgbm", "random_forest"}))
+        if normalized_profile == "noise_moderate":
+            if model_key == "xgboost":
+                updated.update(
+                    {
+                        "n_estimators": 40,
+                        "max_depth": 2,
+                        "learning_rate": 0.03,
+                        "subsample": 0.7,
+                        "colsample_bytree": 0.7,
+                    }
+                )
+            elif model_key == "lightgbm":
+                updated.update(
+                    {
+                        "n_estimators": 40,
+                        "max_depth": 2,
+                        "num_leaves": 5,
+                        "learning_rate": 0.03,
+                        "subsample": 0.7,
+                        "colsample_bytree": 0.7,
+                    }
+                )
+            return updated
+        if model_key == "xgboost":
+            updated["n_estimators"] = max(int(updated.get("n_estimators", 0) or 0), 120)
+            updated["max_depth"] = max(int(updated.get("max_depth", 0) or 0), 3)
+            updated["subsample"] = max(float(updated.get("subsample", 0.0) or 0.0), 0.9)
+            updated["colsample_bytree"] = max(float(updated.get("colsample_bytree", 0.0) or 0.0), 0.9)
+        elif model_key == "lightgbm":
+            updated["n_estimators"] = max(int(updated.get("n_estimators", 0) or 0), 120)
+            updated["max_depth"] = max(int(updated.get("max_depth", 0) or 0), 3)
+            updated["num_leaves"] = max(int(updated.get("num_leaves", 0) or 0), 7)
+            updated["subsample"] = max(float(updated.get("subsample", 0.0) or 0.0), 0.9)
+            updated["colsample_bytree"] = max(float(updated.get("colsample_bytree", 0.0) or 0.0), 0.9)
+        return updated
+
+    if model_key == "mlp":
+        if normalized_profile == "noise_moderate":
+            updated["feature_scope"] = "x_op+x_cond"
+            updated["hidden_dim"] = 20
+            updated["dropout"] = 0.5
+            updated["epochs"] = 20
+            updated["min_epochs_before_stop"] = 8
+            updated["class_weighting"] = "none"
+            updated["lr"] = 0.0005
+            updated["weight_decay"] = 0.002
+            return updated
+        updated["hidden_dim"] = max(int(updated.get("hidden_dim", 0) or 0), 32)
+        updated["dropout"] = min(float(updated.get("dropout", 1.0)), 0.35)
+        updated["epochs"] = max(int(updated.get("epochs", 0) or 0), 30)
+        updated["min_epochs_before_stop"] = max(int(updated.get("min_epochs_before_stop", 0) or 0), 8)
+    elif model_key == "tcn":
+        if normalized_profile == "noise_moderate":
+            updated["hidden_dim"] = 16
+            updated["dropout"] = 0.4
+            updated["epochs"] = 20
+            updated["min_epochs_before_stop"] = 8
+            return updated
+        updated["hidden_dim"] = max(int(updated.get("hidden_dim", 0) or 0), 16)
+        updated["dropout"] = min(float(updated.get("dropout", 1.0)), 0.35)
+        updated["epochs"] = max(int(updated.get("epochs", 0) or 0), 25)
+        updated["min_epochs_before_stop"] = max(int(updated.get("min_epochs_before_stop", 0) or 0), 8)
+    elif model_key in {"autoformer", "transformer", "itransformer"}:
+        if normalized_profile == "noise_moderate":
+            if model_key == "transformer":
+                updated["feature_scope"] = "x_op+x_cond"
+                updated["d_model"] = 16
+                updated["dropout"] = 0.45
+                updated["epochs"] = 18
+                updated["weight_decay"] = 0.0008
+            else:
+                updated["d_model"] = 24
+                updated["dropout"] = 0.35
+                updated["epochs"] = 20
+            updated["num_layers"] = 1
+            updated["min_epochs_before_stop"] = 8
+            return updated
+        updated["d_model"] = max(int(updated.get("d_model", 0) or 0), 24)
+        updated["num_layers"] = max(int(updated.get("num_layers", 0) or 0), 1)
+        updated["dropout"] = min(float(updated.get("dropout", 1.0)), 0.35)
+        updated["epochs"] = max(int(updated.get("epochs", 0) or 0), 25)
+        updated["min_epochs_before_stop"] = max(int(updated.get("min_epochs_before_stop", 0) or 0), 8)
+    return updated
+
+
 def load_reference_clean_rows_from_comparison_summaries(
     *,
     baseline_summary_path: Path,
@@ -1388,7 +1493,11 @@ def _train_and_evaluate(
     for model_key in args.models:
         print(f"\n=== 准备模型: {model_key} ===", flush=True)
         if model_key in ml_models:
-            settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
+            settings = apply_baseline_profile(
+                model_key,
+                resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key),
+                getattr(args, "baseline_profile", "comparison"),
+            )
             if bool(args.strict_comparison_artifacts):
                 model = load_comparison_ml_model_artifact(comparison_artifact_root, model_key)
             else:
@@ -1435,7 +1544,11 @@ def _train_and_evaluate(
             else:
                 fresh_clean_by_model[model_key] = recomputed_clean_row
         elif model_key in torch_models:
-            settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
+            settings = apply_baseline_profile(
+                model_key,
+                resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key),
+                getattr(args, "baseline_profile", "comparison"),
+            )
             if bool(args.strict_comparison_artifacts):
                 settings = comparison_torch_settings(settings)
             scoped_npz_dir = output_root / "_scoped_torch_npz" / model_key
@@ -1586,7 +1699,11 @@ def _train_and_evaluate(
             if model_key in ml_models:
                 model = trained_models[model_key]
                 num_classes = baseline._num_classes(clean_npz)
-                settings = resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key)
+                settings = apply_baseline_profile(
+                    model_key,
+                    resolve_model_run_settings(comparison_config, model_key, ratio_key=ratio_key),
+                    getattr(args, "baseline_profile", "comparison"),
+                )
                 if bool(args.strict_comparison_artifacts):
                     x_val, y_val = _flatten_split_all_modalities(clean_npz, split_value=1)
                     x_test, y_test = _flatten_split_all_modalities(npz_path, split_value=2)
@@ -1746,6 +1863,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--clean-source", choices=["same-run", "reference", "comparison-results"], default="comparison-results", help="same-run：同次训练/同一checkpoint；reference：旧汇总；comparison-results：results/对比实验结果.csv")
     parser.add_argument("--comparison-artifact-root", default="results/updated_dataset_baseline_ratio_comparison_20260513_seed44", help="严格复用对比实验模型时的根目录，模型目录格式为 root/ratio/model")
     parser.add_argument("--strict-comparison-artifacts", action=argparse.BooleanOptionalAction, default=False, help="只加载对比实验模型产物；缺少 model.joblib/best.ckpt 时直接失败，不在噪声脚本内重训")
+    parser.add_argument("--baseline-profile", choices=["noise_moderate", "noise_window_full", "comparison"], default="noise_moderate", help="噪声实验默认使用中等容量窗口级 baseline；noise_window_full 使用更强全模态 baseline；comparison 保留配置文件中的对比实验口径")
     parser.add_argument("--require-clean-match", action=argparse.BooleanOptionalAction, default=True, help="写新表前要求本轮 clean 校验指标与对比实验 clean 一致")
     parser.add_argument("--clean-match-tolerance", type=float, default=5e-4)
     parser.add_argument("--models", nargs="+", default=None, choices=list(MODEL_CATEGORIES.keys()))
@@ -1850,6 +1968,7 @@ def main(argv: list[str] | None = None) -> None:
         "noise_scope": "test_split_only",
         "snr_scope": str(args.snr_scope),
         "noise_repeats": int(args.noise_repeats),
+        "baseline_profile": str(args.baseline_profile),
         "clean_rows_source": "same_run_same_checkpoint" if args.clean_source == "same-run" else "reference_clean_summary_explicit",
         "original_no_noise_workbook_sheets": "untouched",
         "reference_clean_summary": str(ROOT / args.reference_clean_summary),
