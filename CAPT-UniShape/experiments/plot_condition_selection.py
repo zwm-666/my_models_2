@@ -15,7 +15,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import f_classif
 from sklearn.preprocessing import StandardScaler
 
-
 ROOT = Path(__file__).resolve().parents[1]
 FIG_DIR = ROOT / "outputs" / "paper_figures"
 if str(ROOT) not in sys.path:
@@ -29,16 +28,23 @@ from plot_style import (  # noqa: E402
     FULL_FIG_WIDTH_CM,
     LEGEND_KWARGS,
     MODEL_COLORS,
-    SUBPLOT_MARGINS_TOP_LEGEND,
-    TOP_LEGEND_ANCHOR_Y,
     apply_paper_style,
     save_paper_figure,
     style_axes,
     style_legend_frame,
 )
-from experiments.build_official_npz_from_self_excel import _choose_group_split, _derive_group_keys, _derive_segment_group_keys  # noqa: E402
-from src.datasets.self_dataset import COND_COLS, EIS_COLS, STACK_COLS, TIME_COL  # noqa: E402
 
+from experiments.build_official_npz_from_self_excel import (  # noqa: E402
+    _choose_group_split,
+    _derive_group_keys,
+    _derive_segment_group_keys,
+)
+from src.datasets.self_dataset import (  # noqa: E402
+    COND_COLS,
+    EIS_COLS,
+    STACK_COLS,
+    TIME_COL,
+)
 
 RAW_EXCEL = ROOT / "data" / "raw" / "水淹和膜干故障测试数据_补充特征汇总.xlsx"
 OUT_DIR = FIG_DIR / "condition_selection"
@@ -84,8 +90,22 @@ def english_condition_names(columns: list[str]) -> list[str]:
 
 def condition_candidate_columns(frame: pd.DataFrame) -> list[str]:
     label_col = _label_column(frame)
-    excluded = {TIME_COL, label_col, "label", "Label", "标签", "类型", "__label__", *EIS_COLS, *STACK_COLS}
-    return [str(col) for col in frame.select_dtypes(include=[np.number]).columns if str(col) not in excluded]
+    excluded = {
+        TIME_COL,
+        label_col,
+        "label",
+        "Label",
+        "标签",
+        "类型",
+        "__label__",
+        *EIS_COLS,
+        *STACK_COLS,
+    }
+    return [
+        str(col)
+        for col in frame.select_dtypes(include=[np.number]).columns
+        if str(col) not in excluded
+    ]
 
 
 def _training_group_mask(
@@ -110,11 +130,16 @@ def _training_group_mask(
             label_boundary=bool(segment_label_boundary),
         )
     else:
-        working["__group_key__"] = _derive_group_keys(pd.Series(working[TIME_COL].to_numpy()), split_mode)
+        working["__group_key__"] = _derive_group_keys(
+            pd.Series(working[TIME_COL].to_numpy()), split_mode
+        )
     groups = np.asarray(working["__group_key__"].unique())
     group_label_map = working.groupby("__group_key__")["__label__"].first()
     group_labels = np.array([group_label_map[group] for group in groups])
-    row_counts = {group: int(count) for group, count in working.groupby("__group_key__").size().items()}
+    row_counts = {
+        group: int(count)
+        for group, count in working.groupby("__group_key__").size().items()
+    }
     train_groups, _val_groups, _test_groups, _quality = _choose_group_split(
         groups=groups,
         group_labels=group_labels,
@@ -137,7 +162,9 @@ def _training_group_mask(
         min_test_class_groups=1,
         prefer_balanced_train_groups=False,
     )
-    return working["__group_key__"].isin(set(train_groups.tolist())).to_numpy(dtype=bool)
+    return (
+        working["__group_key__"].isin(set(train_groups.tolist())).to_numpy(dtype=bool)
+    )
 
 
 def prepare_condition_frame(
@@ -153,14 +180,18 @@ def prepare_condition_frame(
     val_size: float = 0.25,
     group_split_strategy: str = "holdout_first",
     split_retries: int = 50,
-) -> tuple[pd.DataFrame, np.ndarray[Any, np.dtype[np.int64]], list[str], dict[str, Any]]:
+) -> tuple[
+    pd.DataFrame, np.ndarray[Any, np.dtype[np.int64]], list[str], dict[str, Any]
+]:
     frame = pd.read_excel(excel_path, sheet_name=sheet_name, engine="openpyxl")
     label_col = _label_column(frame)
     labels_raw = frame[label_col]
     if labels_raw.dtype == object:
         labels = labels_raw.astype(str).str.strip().map(RAW_LABEL_MAP)
         if labels.isna().any():
-            unknown = sorted(set(labels_raw.astype(str).str.strip()) - set(RAW_LABEL_MAP))
+            unknown = sorted(
+                set(labels_raw.astype(str).str.strip()) - set(RAW_LABEL_MAP)
+            )
             raise ValueError(f"Unknown labels: {unknown}")
         y = labels.to_numpy(dtype=np.int64)
     else:
@@ -215,20 +246,34 @@ def condition_screening_scores(
             "display_name": english_condition_names(list(values.columns)),
             "selected": [str(col) in set(COND_COLS) for col in values.columns],
             "rf_importance": forest.feature_importances_.astype(float),
-            "anova_f": np.nan_to_num(f_values, nan=0.0, posinf=0.0, neginf=0.0).astype(float),
-            "anova_p": np.nan_to_num(p_values, nan=1.0, posinf=1.0, neginf=1.0).astype(float),
+            "anova_f": np.nan_to_num(f_values, nan=0.0, posinf=0.0, neginf=0.0).astype(
+                float
+            ),
+            "anova_p": np.nan_to_num(p_values, nan=1.0, posinf=1.0, neginf=1.0).astype(
+                float
+            ),
         }
     )
-    score["rf_rank"] = score["rf_importance"].rank(ascending=False, method="min").astype(int)
-    score["anova_rank"] = score["anova_f"].rank(ascending=False, method="min").astype(int)
+    score["rf_rank"] = (
+        score["rf_importance"].rank(ascending=False, method="min").astype(int)
+    )
+    score["anova_rank"] = (
+        score["anova_f"].rank(ascending=False, method="min").astype(int)
+    )
     n_features = max(len(score), 1)
     score["rf_rank_score"] = (n_features - score["rf_rank"] + 1) / n_features
     score["anova_rank_score"] = (n_features - score["anova_rank"] + 1) / n_features
-    score["fused_relevance"] = 0.5 * score["rf_rank_score"] + 0.5 * score["anova_rank_score"]
-    return score.sort_values(["selected", "rf_importance"], ascending=[False, False]).reset_index(drop=True)
+    score["fused_relevance"] = (
+        0.5 * score["rf_rank_score"] + 0.5 * score["anova_rank_score"]
+    )
+    return score.sort_values(
+        ["selected", "rf_importance"], ascending=[False, False]
+    ).reset_index(drop=True)
 
 
-def add_redundancy_to_selected(scores: pd.DataFrame, values: pd.DataFrame, selected_features: list[str]) -> pd.DataFrame:
+def add_redundancy_to_selected(
+    scores: pd.DataFrame, values: pd.DataFrame, selected_features: list[str]
+) -> pd.DataFrame:
     corr = values.corr().abs()
     selected_set = {feature for feature in selected_features if feature in corr.columns}
     rows = []
@@ -271,7 +316,10 @@ def clustered_correlation_order(values: pd.DataFrame, columns: list[str]) -> lis
 def _wrap_labels(labels: list[str], width: int = 22) -> list[str]:
     import textwrap
 
-    return ["\n".join(textwrap.wrap(label, width=width, break_long_words=False)) for label in labels]
+    return [
+        "\n".join(textwrap.wrap(label, width=width, break_long_words=False))
+        for label in labels
+    ]
 
 
 def _set_tick_label_size(ax, size: float) -> None:
@@ -279,13 +327,24 @@ def _set_tick_label_size(ax, size: float) -> None:
         label.set_fontsize(size)
 
 
-def _sparse_bar_codes(plot_frame: pd.DataFrame, value_column: str, *, top_k: int = 5) -> list[str]:
+def _sparse_bar_codes(
+    plot_frame: pd.DataFrame, value_column: str, *, top_k: int = 5
+) -> list[str]:
     important = set(plot_frame.loc[plot_frame["selected"], "feature"].astype(str))
-    important.update(plot_frame.sort_values(value_column, ascending=False).head(top_k)["feature"].astype(str))
-    return [str(row["code"]) if str(row["feature"]) in important else "" for _, row in plot_frame.iterrows()]
+    important.update(
+        plot_frame.sort_values(value_column, ascending=False)
+        .head(top_k)["feature"]
+        .astype(str)
+    )
+    return [
+        str(row["code"]) if str(row["feature"]) in important else ""
+        for _, row in plot_frame.iterrows()
+    ]
 
 
-def _annotate_bar_codes(ax, plot_frame: pd.DataFrame, value_column: str, *, top_k: int = 5) -> None:
+def _annotate_bar_codes(
+    ax, plot_frame: pd.DataFrame, value_column: str, *, top_k: int = 5
+) -> None:
     labels = _sparse_bar_codes(plot_frame, value_column, top_k=top_k)
     x_values = plot_frame[value_column].to_numpy(dtype=float)
     x_limit = max(float(np.nanmax(x_values)) * 1.10, 1.0)
@@ -304,7 +363,9 @@ def _annotate_bar_codes(ax, plot_frame: pd.DataFrame, value_column: str, *, top_
         )
 
 
-def plot_condition_selection(scores: pd.DataFrame, values: pd.DataFrame, output_base: Path) -> None:
+def plot_condition_selection(
+    scores: pd.DataFrame, values: pd.DataFrame, output_base: Path
+) -> dict[str, Path]:
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
 
@@ -325,54 +386,116 @@ def plot_condition_selection(scores: pd.DataFrame, values: pd.DataFrame, output_
     top_scores = scores.sort_values("rf_importance", ascending=True).copy()
     top_scores["code"] = top_scores["feature"].map(feature_codes)
     y_pos = np.arange(len(top_scores))
-    bar_colors = [selected_color if selected else candidate_color for selected in top_scores["selected"]]
+    bar_colors = [
+        selected_color if selected else candidate_color
+        for selected in top_scores["selected"]
+    ]
 
     selected_columns = [col for col in COND_COLS if col in values.columns]
     remaining_columns = [col for col in values.columns if col not in selected_columns]
-    corr_columns = clustered_correlation_order(values, selected_columns + remaining_columns)
+    corr_columns = clustered_correlation_order(
+        values, selected_columns + remaining_columns
+    )
     corr_matrix = values[corr_columns].corr().abs().to_numpy(dtype=float)
     corr_labels = [feature_codes[col] for col in corr_columns]
 
-    fig = plt.figure(figsize=(FULL_FIG_WIDTH_CM * CM, 25.8 * CM))
-    grid = fig.add_gridspec(
-        4,
-        2,
-        height_ratios=[2.55, 0.92, 2.05, 0.90],
-        hspace=0.42,
-        wspace=0.32,
-    )
-    ax_rf = fig.add_subplot(grid[0, 0])
-    ax_anova = fig.add_subplot(grid[0, 1])
-    ax_redundancy = fig.add_subplot(grid[1, :])
-    ax_corr = fig.add_subplot(grid[2, :])
-    ax_key = fig.add_subplot(grid[3, :])
+    handles = [
+        Patch(
+            facecolor=selected_color, edgecolor="none", label="Current x_cond variable"
+        ),
+        Patch(facecolor=candidate_color, edgecolor="none", label="Other candidate"),
+    ]
 
-    ax_rf.barh(y_pos, top_scores["rf_importance"], color=bar_colors, edgecolor="white", linewidth=0.3, zorder=3)
+    importance_base = output_base.with_name(f"{output_base.name}_importance")
+    fig_importance = plt.figure(figsize=(FULL_FIG_WIDTH_CM * CM, 10.8 * CM))
+    grid_importance = fig_importance.add_gridspec(1, 2, wspace=0.32)
+    ax_rf = fig_importance.add_subplot(grid_importance[0, 0])
+    ax_anova = fig_importance.add_subplot(grid_importance[0, 1])
+
+    ax_rf.barh(
+        y_pos,
+        top_scores["rf_importance"],
+        color=bar_colors,
+        edgecolor="white",
+        linewidth=0.3,
+        zorder=3,
+    )
     ax_rf.set_yticks(y_pos, top_scores["code"].tolist())
     ax_rf.set_xlabel("Random forest importance", labelpad=2.0)
     ax_rf.set_ylabel("Candidate variables")
     style_axes(ax_rf, grid_axis="x")
     ax_rf.tick_params(axis="y", pad=2)
     _set_tick_label_size(ax_rf, 5.8)
-    ax_rf.text(0.02, 1.005, "(a)", transform=ax_rf.transAxes, ha="left", va="bottom", fontweight="normal")
+    ax_rf.text(
+        0.02,
+        1.005,
+        "(a)",
+        transform=ax_rf.transAxes,
+        ha="left",
+        va="bottom",
+        fontweight="normal",
+    )
 
     anova_plot = scores.sort_values("anova_f", ascending=True).copy()
     anova_plot["code"] = anova_plot["feature"].map(feature_codes)
     y_anova = np.arange(len(anova_plot))
-    anova_colors = [selected_color if selected else candidate_color for selected in anova_plot["selected"]]
-    ax_anova.barh(y_anova, anova_plot["anova_f"], color=anova_colors, edgecolor="white", linewidth=0.3, zorder=3)
+    anova_colors = [
+        selected_color if selected else candidate_color
+        for selected in anova_plot["selected"]
+    ]
+    ax_anova.barh(
+        y_anova,
+        anova_plot["anova_f"],
+        color=anova_colors,
+        edgecolor="white",
+        linewidth=0.3,
+        zorder=3,
+    )
     ax_anova.set_yticks(y_anova, anova_plot["code"].tolist())
     ax_anova.set_xlabel("ANOVA F-score", labelpad=2.0)
     ax_anova.set_ylabel("Candidate variables")
     style_axes(ax_anova, grid_axis="x")
     ax_anova.tick_params(axis="y", pad=2)
     _set_tick_label_size(ax_anova, 5.8)
-    ax_anova.text(0.02, 1.005, "(b)", transform=ax_anova.transAxes, ha="left", va="bottom", fontweight="normal")
+    ax_anova.text(
+        0.02,
+        1.005,
+        "(b)",
+        transform=ax_anova.transAxes,
+        ha="left",
+        va="bottom",
+        fontweight="normal",
+    )
 
-    image = ax_corr.imshow(corr_matrix, vmin=0.0, vmax=1.0, cmap="viridis", aspect="auto")
-    ax_corr.set_xticks(np.arange(len(corr_columns)), corr_labels, rotation=90, ha="center")
-    ax_corr.set_yticks(np.arange(len(corr_columns)), corr_labels)
-    selected_code_positions = [idx for idx, col in enumerate(corr_columns) if col in set(COND_COLS)]
+    legend = fig_importance.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.965),
+        ncol=2,
+        **LEGEND_KWARGS,
+    )
+    style_legend_frame(legend)
+    fig_importance.subplots_adjust(left=0.12, right=0.98, top=0.84, bottom=0.16)
+    output_base.parent.mkdir(parents=True, exist_ok=True)
+    save_paper_figure(
+        fig_importance, str(importance_base), formats=("png", "pdf", "svg")
+    )
+    plt.close(fig_importance)
+
+    redundancy_base = output_base.with_name(
+        f"{output_base.name}_redundancy_correlation"
+    )
+    fig_redundancy = plt.figure(figsize=(FULL_FIG_WIDTH_CM * CM, 15.6 * CM))
+    grid_redundancy = fig_redundancy.add_gridspec(
+        3,
+        1,
+        height_ratios=[0.95, 2.15, 0.82],
+        hspace=0.48,
+    )
+    ax_redundancy = fig_redundancy.add_subplot(grid_redundancy[0, 0])
+    ax_corr = fig_redundancy.add_subplot(grid_redundancy[1, 0])
+    ax_key = fig_redundancy.add_subplot(grid_redundancy[2, 0])
+
     decision_scores = scores.copy()
     decision_scores["code"] = decision_scores["feature"].map(feature_codes)
     redundancy_plot = (
@@ -382,10 +505,22 @@ def plot_condition_selection(scores: pd.DataFrame, values: pd.DataFrame, output_
         .sort_values("max_corr_to_selected", ascending=True)
         .copy()
     )
-    redundancy_plot["nearest_code"] = redundancy_plot["nearest_selected"].map(feature_codes)
+    redundancy_plot["nearest_code"] = redundancy_plot["nearest_selected"].map(
+        feature_codes
+    )
     y_red = np.arange(len(redundancy_plot))
-    ax_redundancy.barh(y_red, redundancy_plot["max_corr_to_selected"], color=candidate_color, edgecolor="white", linewidth=0.3, zorder=3)
-    ax_redundancy.set_yticks(y_red, [f"{row.code} -> {row.nearest_code}" for row in redundancy_plot.itertuples()])
+    ax_redundancy.barh(
+        y_red,
+        redundancy_plot["max_corr_to_selected"],
+        color=candidate_color,
+        edgecolor="white",
+        linewidth=0.3,
+        zorder=3,
+    )
+    ax_redundancy.set_yticks(
+        y_red,
+        [f"{row.code} -> {row.nearest_code}" for row in redundancy_plot.itertuples()],
+    )
     ax_redundancy.axvline(0.90, color=redundancy_color, linestyle="--", linewidth=0.9)
     for y, row in zip(y_red, redundancy_plot.itertuples()):
         value = float(row.max_corr_to_selected)
@@ -398,18 +533,52 @@ def plot_condition_selection(scores: pd.DataFrame, values: pd.DataFrame, output_
             va="center",
             clip_on=False,
         )
-    ax_redundancy.text(0.90, 1.02, "|r| = 0.90", transform=ax_redundancy.get_xaxis_transform(), ha="center", va="bottom", fontsize=7.2)
+    ax_redundancy.text(
+        0.90,
+        1.02,
+        "|r| = 0.90",
+        transform=ax_redundancy.get_xaxis_transform(),
+        ha="center",
+        va="bottom",
+        fontsize=7.2,
+    )
     ax_redundancy.set_xlim(0.0, 1.10)
     ax_redundancy.set_xlabel("Max |r| to current x_cond variable")
-    ax_redundancy.set_ylabel("Candidate -> nearest x_cond")
     style_axes(ax_redundancy, grid_axis="x")
     _set_tick_label_size(ax_redundancy, 7.2)
-    ax_redundancy.text(0.02, 1.08, "(c)", transform=ax_redundancy.transAxes, ha="left", va="bottom", fontweight="normal")
+    ax_redundancy.text(
+        0.02,
+        1.08,
+        "(a)",
+        transform=ax_redundancy.transAxes,
+        ha="left",
+        va="bottom",
+        fontweight="normal",
+    )
 
+    image = ax_corr.imshow(
+        corr_matrix, vmin=0.0, vmax=1.0, cmap="viridis", aspect="auto"
+    )
+    ax_corr.set_xticks(
+        np.arange(len(corr_columns)), corr_labels, rotation=90, ha="center"
+    )
+    ax_corr.set_yticks(np.arange(len(corr_columns)), corr_labels)
+    selected_code_positions = [
+        idx for idx, col in enumerate(corr_columns) if col in set(COND_COLS)
+    ]
     ax_corr.set_title("Clustered correlation map", pad=10)
     for idx, col in enumerate(corr_columns):
         if col in set(COND_COLS):
-            ax_corr.add_patch(plt.Rectangle((idx - 0.5, idx - 0.5), 1, 1, fill=False, edgecolor="white", linewidth=1.2))
+            ax_corr.add_patch(
+                plt.Rectangle(
+                    (idx - 0.5, idx - 0.5),
+                    1,
+                    1,
+                    fill=False,
+                    edgecolor="white",
+                    linewidth=1.2,
+                )
+            )
     for idx in selected_code_positions:
         ax_corr.axvline(idx, color="white", linewidth=0.3, alpha=0.55)
         ax_corr.axhline(idx, color="white", linewidth=0.3, alpha=0.55)
@@ -417,8 +586,16 @@ def plot_condition_selection(scores: pd.DataFrame, values: pd.DataFrame, output_
     ax_corr.tick_params(axis="x", pad=2)
     ax_corr.tick_params(axis="y", pad=2)
     _set_tick_label_size(ax_corr, 6.2)
-    ax_corr.text(0.02, 1.08, "(d)", transform=ax_corr.transAxes, ha="left", va="bottom", fontweight="normal")
-    cbar = fig.colorbar(image, ax=ax_corr, fraction=0.020, pad=0.02)
+    ax_corr.text(
+        0.02,
+        1.02,
+        "(b)",
+        transform=ax_corr.transAxes,
+        ha="left",
+        va="bottom",
+        fontweight="normal",
+    )
+    cbar = fig_redundancy.colorbar(image, ax=ax_corr, fraction=0.020, pad=0.02)
     cbar.set_label("|r|")
     ax_corr.set_xlabel("Clustered candidate variables")
     ax_corr.set_ylabel("Clustered candidate variables")
@@ -434,9 +611,19 @@ def plot_condition_selection(scores: pd.DataFrame, values: pd.DataFrame, output_
     rows_per_col = int(np.ceil(len(key_rows) / columns))
     for col_idx in range(columns):
         x = 0.02 + col_idx * 0.49
-        for row_idx, text in enumerate(key_rows[col_idx * rows_per_col : (col_idx + 1) * rows_per_col]):
+        for row_idx, text in enumerate(
+            key_rows[col_idx * rows_per_col : (col_idx + 1) * rows_per_col]
+        ):
             y = 0.98 - row_idx * (0.92 / max(rows_per_col - 1, 1))
-            ax_key.text(x, y, text, transform=ax_key.transAxes, ha="left", va="top", fontsize=5.8)
+            ax_key.text(
+                x,
+                y,
+                text,
+                transform=ax_key.transAxes,
+                ha="left",
+                va="top",
+                fontsize=5.8,
+            )
     ax_key.text(
         0.02,
         -0.08,
@@ -447,25 +634,21 @@ def plot_condition_selection(scores: pd.DataFrame, values: pd.DataFrame, output_
         fontsize=5.8,
     )
 
-    handles = [
-        Patch(facecolor=selected_color, edgecolor="none", label="Current x_cond variable"),
-        Patch(facecolor=candidate_color, edgecolor="none", label="Other candidate"),
-    ]
-    legend = fig.legend(
+    legend = fig_redundancy.legend(
         handles=handles,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.975),
+        bbox_to_anchor=(0.5, 0.985),
         ncol=2,
         **LEGEND_KWARGS,
     )
     style_legend_frame(legend)
-    margins = dict(SUBPLOT_MARGINS_TOP_LEGEND)
-    margins.update(left=0.12, right=0.98, top=0.90, bottom=0.04)
-    fig.subplots_adjust(**margins)
+    fig_redundancy.subplots_adjust(left=0.12, right=0.98, top=0.90, bottom=0.04)
 
-    output_base.parent.mkdir(parents=True, exist_ok=True)
-    save_paper_figure(fig, str(output_base), formats=("png", "pdf", "svg"))
-    plt.close(fig)
+    save_paper_figure(
+        fig_redundancy, str(redundancy_base), formats=("png", "pdf", "svg")
+    )
+    plt.close(fig_redundancy)
+    return {"importance": importance_base, "redundancy_correlation": redundancy_base}
 
 
 def write_scores_csv(scores: pd.DataFrame, output_path: Path) -> None:
@@ -489,13 +672,35 @@ def write_scores_csv(scores: pd.DataFrame, output_path: Path) -> None:
         writer.writeheader()
         for row in scores[existing_fields].to_dict("records"):
             formatted = dict(row)
-            for key in ["rf_importance", "anova_f", "anova_p", "fused_relevance", "max_corr_to_selected"]:
+            for key in [
+                "rf_importance",
+                "anova_f",
+                "anova_p",
+                "fused_relevance",
+                "max_corr_to_selected",
+            ]:
                 if key in formatted:
                     formatted[key] = f"{float(formatted[key]):.4f}"
             writer.writerow(formatted)
 
 
-def write_meta(path: Path, *, excel_path: Path, figure_base: Path, scores_csv: Path, candidates: list[str], screening_meta: dict[str, Any]) -> None:
+def _figure_paths(base: Path) -> dict[str, str]:
+    return {
+        "png": str(base.with_suffix(".png")),
+        "pdf": str(base.with_suffix(".pdf")),
+        "svg": str(base.with_suffix(".svg")),
+    }
+
+
+def write_meta(
+    path: Path,
+    *,
+    excel_path: Path,
+    figure_bases: dict[str, Path],
+    scores_csv: Path,
+    candidates: list[str],
+    screening_meta: dict[str, Any],
+) -> None:
     meta = {
         "analysis": "Condition-variable screening visualization",
         "source_excel": str(excel_path),
@@ -507,9 +712,7 @@ def write_meta(path: Path, *, excel_path: Path, figure_base: Path, scores_csv: P
         "selected_count": len(COND_COLS),
         "selected_variables": english_condition_names(COND_COLS),
         "screening_rule": "RandomForest importance + ANOVA F-score are converted to rank scores and averaged as fused relevance; candidate variables are then checked against correlation redundancy, with |r| = 0.9 shown as the redundancy reference level.",
-        "figure_png": str(figure_base.with_suffix(".png")),
-        "figure_pdf": str(figure_base.with_suffix(".pdf")),
-        "figure_svg": str(figure_base.with_suffix(".svg")),
+        "figures": {name: _figure_paths(base) for name, base in figure_bases.items()},
         "scores_csv": str(scores_csv),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -528,7 +731,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split-mode", default="segment")
     parser.add_argument("--segment-gap-seconds", type=float, default=600.0)
     parser.add_argument("--segment-block-seconds", type=float, default=300.0)
-    parser.add_argument("--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--segment-label-boundary", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--group-split-strategy", default="holdout_first")
     parser.add_argument("--split-retries", type=int, default=50)
     return parser
@@ -560,10 +765,30 @@ def main(argv: list[str] | None = None) -> None:
     figure_base = output_dir / str(args.prefix)
     scores_csv = output_dir / f"{args.prefix}_scores.csv"
     meta_json = output_dir / f"{args.prefix}.meta.json"
-    plot_condition_selection(scores, values, figure_base)
+    figure_bases = plot_condition_selection(scores, values, figure_base)
     write_scores_csv(scores, scores_csv)
-    write_meta(meta_json, excel_path=excel_path, figure_base=figure_base, scores_csv=scores_csv, candidates=candidates, screening_meta=screening_meta)
-    print(json.dumps({"figure": str(figure_base.with_suffix(".png")), "scores_csv": str(scores_csv), "meta": str(meta_json)}, ensure_ascii=False, indent=2))
+    write_meta(
+        meta_json,
+        excel_path=excel_path,
+        figure_bases=figure_bases,
+        scores_csv=scores_csv,
+        candidates=candidates,
+        screening_meta=screening_meta,
+    )
+    print(
+        json.dumps(
+            {
+                "figures": {
+                    name: str(base.with_suffix(".png"))
+                    for name, base in figure_bases.items()
+                },
+                "scores_csv": str(scores_csv),
+                "meta": str(meta_json),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

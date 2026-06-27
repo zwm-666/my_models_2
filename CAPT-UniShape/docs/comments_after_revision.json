@@ -1,0 +1,497 @@
+{
+  "file": "docs\\lunwen_5.26（修2-6.12备注）_根据备注修改_含批注.docx",
+  "comment_count": 39,
+  "comments": [
+    {
+      "id": "3",
+      "author": "睿 全",
+      "date": "2026-06-10T20:02:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "设置为一个框框，很多论文那样，不工表格序号和标题",
+      "anchors": []
+    },
+    {
+      "id": "4",
+      "author": "睿 全",
+      "date": "2026-06-10T20:00:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "啥意思？",
+      "anchors": []
+    },
+    {
+      "id": "5",
+      "author": "睿 全",
+      "date": "2026-06-10T20:39:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "下面文字有点逻辑很乱，应该依次围绕这些方法进行综述和点评总结。下面的都是没有主线，想到哪个文献说哪个",
+      "anchors": []
+    },
+    {
+      "id": "6",
+      "author": "睿 全",
+      "date": "2026-06-10T20:37:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "不要堆叠太多，要分开最多2个一起堆叠引用",
+      "anchors": []
+    },
+    {
+      "id": "17",
+      "author": "睿 全",
+      "date": "2026-06-12T16:23:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "注意格式统一：Rui Quan, Dazhi Liu, Yulong Zhou, Hang Wan. A cost-effective real-time energy management strategy for fuel cell electric vehicle combining dynamic programming and model predictive control. IEEE Transactions on Vehicular Technology. https://doi.org/TVT.2026.3665713.",
+      "anchors": []
+    },
+    {
+      "id": "20",
+      "author": "睿 全",
+      "date": "2026-06-10T20:41:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "这些都是方法论的泛泛综述堆积，没有层次逻辑，像AI写的。也没有和PEMFC及故障诊断关联，缺乏相关的任何一篇文献。",
+      "anchors": []
+    },
+    {
+      "id": "21",
+      "author": "睿 全",
+      "date": "2026-06-10T20:42:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "上面方法论能证明这个意思吗？",
+      "anchors": []
+    },
+    {
+      "id": "26",
+      "author": "睿 全",
+      "date": "2026-06-10T20:44:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "为什么要提出CAPT-UniShape？前面没有任何说明的原因，上一段能当做“为此”的原因吗？没有任何CAPT-UniShape的介绍和说明，直接提出来？\n后面不是有：UniShape 分支、MLP 工况编码器、Residual KAN-Fusion 、条件感知 RBF prototype transport 分类头这些吗？应该前面要说明有什么优势和特点，你怎么组合构建什么模型，提高上面方法什么性能，改善其不足。",
+      "anchors": []
+    },
+    {
+      "id": "53",
+      "author": "睿 全",
+      "date": "2026-06-12T16:24:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "2.3和2.4节应适当精简融到其它地方，甚至有些可以删除，文字太多很抽象，泛泛而谈",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": "2. PEMFC Fault Characteristics and Diagnostic Problem"
+            },
+            {
+              "where": "end",
+              "text": "2. PEMFC Fault Characteristics and Diagnostic Problem"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "67",
+      "author": "睿 全",
+      "date": "2026-06-12T16:18:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "根据发的空气结构结合图中氢气、水冷系统进行整合",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": ""
+            },
+            {
+              "where": "end",
+              "text": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "83",
+      "author": "睿 全",
+      "date": "2026-06-12T16:01:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "可精简融合到3.1的总结流程里概述说明即可",
+      "anchors": []
+    },
+    {
+      "id": "100",
+      "author": "睿 全",
+      "date": "2026-06-10T21:52:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "感觉这些相关文字和内容可融入到2.2里的几种故障介绍里。没必要单独一节又来叙述一遍故障的特点。有些文字可以精简或者删除",
+      "anchors": []
+    },
+    {
+      "id": "106",
+      "author": "睿 全",
+      "date": "2026-06-10T21:55:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "这段方法可以放到3.1的总体流程和过程里",
+      "anchors": []
+    },
+    {
+      "id": "131",
+      "author": "睿 全",
+      "date": "2026-06-10T22:13:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "公式（1）看不出7维，要说清楚",
+      "anchors": []
+    },
+    {
+      "id": "135",
+      "author": "睿 全",
+      "date": "2026-06-10T22:16:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "哪里有这个标号？公式没有，笔误？",
+      "anchors": []
+    },
+    {
+      "id": "143",
+      "author": "睿 全",
+      "date": "2026-06-10T22:27:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "前面是不是说过了，可以不用很多文字同一个意思反复重复，精简文字。",
+      "anchors": []
+    },
+    {
+      "id": "144",
+      "author": "睿 全",
+      "date": "2026-06-10T22:31:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "模型没有和燃料电池的相关特征或故障分类结果关联起来，很割裂多个框图字母和数字用新罗马字体调整排版",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": ""
+            },
+            {
+              "where": "end",
+              "text": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "148",
+      "author": "睿 全",
+      "date": "2026-06-10T22:29:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "这些图和上面文字没有和燃料电池特征及故障联系起来，很割裂",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": ""
+            },
+            {
+              "where": "end",
+              "text": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "153",
+      "author": "睿 全",
+      "date": "2026-06-10T22:40:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "参数说明补充：片数：216？ 额定功率：75kW 额定功率下电压：156V 输出电压范围：122-244 输出电流范围：30-540 电堆尺寸mm：300*138*641 电堆重量：41kg",
+      "anchors": []
+    },
+    {
+      "id": "167",
+      "author": "睿 全",
+      "date": "2026-06-10T22:36:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "6:4是啥意思？讲清楚",
+      "anchors": []
+    },
+    {
+      "id": "173",
+      "author": "睿 全",
+      "date": "2026-06-10T22:37:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "空压机拼写错误",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": ""
+            },
+            {
+              "where": "end",
+              "text": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "188",
+      "author": "睿 全",
+      "date": "2026-06-10T22:47:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "按顺序讲内容。图8呢？ 怎么讲完图7直接到了图9？",
+      "anchors": []
+    },
+    {
+      "id": "199",
+      "author": "睿 全",
+      "date": "2026-06-12T11:06:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "多处这样的一个语句一个句号，和后面语言没有连接关系，像是AI写的很杂乱。",
+      "anchors": []
+    },
+    {
+      "id": "232",
+      "author": "睿 全",
+      "date": "2026-06-04T16:10:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "为啥不考虑最小训练集下5:5的性能进行分析，选取次小？",
+      "anchors": []
+    },
+    {
+      "id": "247",
+      "author": "睿 全",
+      "date": "2026-06-12T11:17:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "语义不详，什么为8？",
+      "anchors": []
+    },
+    {
+      "id": "256",
+      "author": "睿 全",
+      "date": "2026-06-12T11:25:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "语义有歧义，没讲清楚。和7个基线模型比应该有7个提升值； 如果是各个比例下相比那要说清楚和谁比较？",
+      "anchors": []
+    },
+    {
+      "id": "304",
+      "author": "睿 全",
+      "date": "2026-06-12T11:27:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "窗口和数据量问题，图中显示是窗口别人会看到是很少数据，造成结果和工作量展示很low",
+      "anchors": []
+    },
+    {
+      "id": "314",
+      "author": "睿 全",
+      "date": "2026-06-12T15:32:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "表5已经有了  说明了，这里图和相关文字重复一遍没必要了。文字可以结合到表5里的总结文字里",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": "Fig. 13. Performance under different train-test ratios: (a) Accuracy; (b) Macro-F1; (c) Weighted-F1."
+            },
+            {
+              "where": "end",
+              "text": "Fig. 13. Performance under different train-test ratios: (a) Accuracy; (b) Macro-F1; (c) Weighted-F1."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "392",
+      "author": "睿 全",
+      "date": "2026-06-12T15:51:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "为什么和上面对比实验模型又不一样？没有充分利用说明，也没有逻辑性，，逻辑混乱自言自语。要比较应该和上面一样，或上面基础上增加其它对比模型",
+      "anchors": []
+    },
+    {
+      "id": "393",
+      "author": "睿 全",
+      "date": "2026-06-12T15:53:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "哪有这个？逐个核对文字和图中对应关系",
+      "anchors": []
+    },
+    {
+      "id": "413",
+      "author": "睿 全",
+      "date": "2026-06-12T15:57:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "结合图说出来，太泛泛而谈",
+      "anchors": []
+    },
+    {
+      "id": "416",
+      "author": "睿 全",
+      "date": "2026-06-12T15:58:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "具体哪些工况影响怎么样，结合图和变量进行具体说明。都是泛泛而谈的文字结果",
+      "anchors": []
+    },
+    {
+      "id": "427",
+      "author": "睿 全",
+      "date": "2026-06-12T16:02:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "上面有类似文字和意思就删除，不要反复重复几个意思，多处地方感觉很重复啰嗦",
+      "anchors": []
+    },
+    {
+      "id": "435",
+      "author": "睿 全",
+      "date": "2026-06-12T16:04:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "删除的相关结果和结论融入到上面对比实验里叙述，或结论文字里即可，要精简。",
+      "anchors": []
+    },
+    {
+      "id": "438",
+      "author": "睿 全",
+      "date": "2026-06-12T16:11:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "严格上应该一段对应一节：5.1~5.4，工4段讲述定性+定量结果和结论，最后一段讲存在不足好未来展望。",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": "6. Conclusions"
+            },
+            {
+              "where": "end",
+              "text": "6. Conclusions"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "462",
+      "author": "睿 全",
+      "date": "2026-06-12T16:06:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "写清楚对比什么模型，在什么比例下，所提模型哪个指标提升多少。太笼统，语义不清晰。只有你自己看得到懂意思。",
+      "anchors": []
+    },
+    {
+      "id": "506",
+      "author": "睿 全",
+      "date": "2026-06-12T16:17:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "5个都是自引，适当错开到其它地方引用插入",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": "Quan R, Yang Z, Qiu Z, et al. Thermal performance simulation and numerical analysis of a fuel cell waste heat utilization system for automotive application. Applied Thermal Engineering, 2024, 252, 123"
+            },
+            {
+              "where": "end",
+              "text": "Quan R, Yang Z, Qiu Z, et al. Thermal performance simulation and numerical analysis of a fuel cell waste heat utilization system for automotive application. Applied Thermal Engineering, 2024, 252, 123"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "507",
+      "author": "睿 全",
+      "date": "2026-06-10T20:11:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "前5个文献适当分散到其它地方，不要一连下来都是5个自引",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": "Quan R, Liang W, Wang J, et al. An enhanced fault diagnosis method for fuel cell system using a kernel extreme learning machine optimized with improved sparrow search algorithm. International Journal "
+            },
+            {
+              "where": "end",
+              "text": "Quan R, Liang W, Wang J, et al. An enhanced fault diagnosis method for fuel cell system using a kernel extreme learning machine optimized with improved sparrow search algorithm. International Journal "
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "508",
+      "author": "睿 全",
+      "date": "2026-06-04T21:27:00Z",
+      "initials": "睿全",
+      "resolved": false,
+      "text": "文献格式搞不规范？统一？",
+      "anchors": [
+        {
+          "part": "word/document.xml",
+          "paragraphs": [
+            {
+              "where": "start",
+              "text": "Dong Y, Jiang H, Wang X, Mu M. An interpretable integration fusion time-frequency prototype contrastive learning for machine fault diagnosis with limited labeled samples. Information Fusion, 2025, 124"
+            },
+            {
+              "where": "end",
+              "text": "Dong Y, Jiang H, Wang X, Mu M. An interpretable integration fusion time-frequency prototype contrastive learning for machine fault diagnosis with limited labeled samples. Information Fusion, 2025, 124"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
